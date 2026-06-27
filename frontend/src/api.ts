@@ -42,6 +42,15 @@ export interface Me {
     is_admin: boolean;
 }
 
+/** The authentication mode the backend enforces. */
+export type AuthMode = "none" | "oauth" | "cloudflare";
+
+/** Public auth metadata, fetched before the caller is authenticated so the
+ *  sign-in screen can present the right flow. */
+export interface AuthInfo {
+    mode: AuthMode;
+}
+
 /** Payload for minting a new snippet. */
 export interface CreateRequest {
     content: string;
@@ -112,6 +121,10 @@ async function extractError(response: Response): Promise<string> {
 }
 
 export const api = {
+    authInfo(): Promise<AuthInfo> {
+        return request<AuthInfo>("/api/auth-info");
+    },
+
     me(): Promise<Me> {
         return request<Me>("/api/me");
     },

@@ -144,6 +144,13 @@ curl -s -X POST http://localhost:8080/api/snippets \
 When `AUTH_MODE=oauth`, send `Authorization: Bearer <jwt>`; identity comes from
 the token's `sub`, while the **admin** role is managed locally (see below).
 
+When `AUTH_MODE=cloudflare`, put Serval's Control Plane behind a Cloudflare Zero
+Trust Access application. Cloudflare authenticates each user at the edge and
+injects a signed `Cf-Access-Jwt-Assertion` header, which Serval validates
+against your team's published certs — the dashboard signs in transparently with
+no token to paste. Identity comes from the token's `sub`; the admin role is
+still managed locally.
+
 ## Configuration
 
 Serval is configured entirely through the environment (a local `.env` is loaded
@@ -158,8 +165,9 @@ if present). See [.env.example](.env.example) for the full list.
 | `DATA_PLANE_ADDR` | `0.0.0.0:3000` | Delivery bind address |
 | `CACHE_BYTE_BUDGET` | `33554432` | Delivery cache size cap, in bytes |
 | `CACHE_MUTABLE_TTL_SECS` | `300` | TTL for mutable aliases in the cache |
-| `AUTH_MODE` | `none` | `none` (local superuser) or `oauth` |
+| `AUTH_MODE` | `none` | `none` (local superuser), `oauth`, or `cloudflare` |
 | `OAUTH_ISSUER` / `OAUTH_AUDIENCE` / `OAUTH_JWKS_URL` | — | Required when `AUTH_MODE=oauth` |
+| `CLOUDFLARE_TEAM_DOMAIN` / `CLOUDFLARE_AUDIENCE` | — | Required when `AUTH_MODE=cloudflare` |
 
 ## Admin roles (CLI)
 

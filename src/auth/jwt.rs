@@ -1,9 +1,12 @@
-//! OAuth/JWT validation backed by a refreshing JWKS cache.
+//! Shared JWKS-backed JWT validation.
 //!
-//! Keys are fetched from the provider's JWKS endpoint and cached behind a TTL.
-//! A token referencing an unknown `kid` triggers a single forced refresh — this
-//! is exactly the path exercised during a provider key rotation — after which a
-//! still-missing key is a hard error rather than an infinite refresh loop.
+//! Both authentication providers Serval understands — a generic OAuth issuer and
+//! Cloudflare Access — present the same shape: a signed JWT whose key set is
+//! published at an HTTPS endpoint and rotated over time. This module owns that
+//! common machinery: a TTL-bounded JWKS cache, validation of signature, issuer,
+//! audience, and expiry, and a single forced refresh when a token references an
+//! unknown `kid` (the key-rotation path). A still-missing key after that refresh
+//! is a hard error rather than an infinite refresh loop.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,15 +19,6 @@ use serde::Deserialize;
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
 
-/// Static configuration for OAuth validation.
-#[derive(Debug, Clone)]
-pub struct OAuthSettings {
-    pub issuer: String,
-    pub audience: String,
-    pub jwks_url: String,
-    pub jwks_cache_ttl: Duration,
-}
-
 /// The validated subset of token claims Serval consumes. Signature, issuer,
 /// audience, and expiry are checked during decode; `sub` is mandatory.
 #[derive(Debug, Clone, Deserialize)]
@@ -34,24 +28,36 @@ pub struct Claims {
     pub email: Option<String>,
 }
 
-/// Validates Bearer JWTs against a cached JWKS.
-pub struct OAuthValidator {
-    settings: OAuthSettings,
+/// Validates JWTs against a cached JWKS for a fixed issuer and audience.
+pub struct JwtValidator {
+    issuer: String,
+    audience: String,
+    jwks_url: String,
+    cache_ttl: Duration,
     client: Client,
     keys: RwLock<HashMap<String, Arc<DecodingKey>>>,
     last_refresh: RwLock<Option<Instant>>,
 }
 
-impl OAuthValidator {
-    /// Build the validator and prime its JWKS cache.
-    pub async fn new(settings: OAuthSettings) -> Result<Self> {
+impl JwtValidator {
+    /// Build the validator and prime its JWKS cache so the first real request
+    /// does not pay refresh latency.
+    pub async fn new(
+        issuer: String,
+        audience: String,
+        jwks_url: String,
+        cache_ttl: Duration,
+    ) -> Result<Self> {
         let client = Client::builder()
-            .user_agent(concat!("serval-oauth/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("serval-auth/", env!("CARGO_PKG_VERSION")))
             .build()
-            .context("failed to build HTTP client for OAuth validation")?;
+            .context("failed to build HTTP client for JWT validation")?;
 
         let validator = Self {
-            settings,
+            issuer,
+            audience,
+            jwks_url,
+            cache_ttl,
             client,
             keys: RwLock::new(HashMap::new()),
             last_refresh: RwLock::new(None),
@@ -70,8 +76,8 @@ impl OAuthValidator {
         let key = self.decoding_key(&kid).await?;
 
         let mut validation = Validation::new(header.alg);
-        validation.set_issuer(&[&self.settings.issuer]);
-        validation.set_audience(&[&self.settings.audience]);
+        validation.set_issuer(&[&self.issuer]);
+        validation.set_audience(&[&self.audience]);
         // `exp` is required and checked by default in jsonwebtoken.
 
         let data = decode::<Claims>(token, key.as_ref(), &validation)
@@ -104,7 +110,7 @@ impl OAuthValidator {
 
     async fn cache_expired(&self) -> bool {
         match *self.last_refresh.read().await {
-            Some(at) => at.elapsed() > self.settings.jwks_cache_ttl,
+            Some(at) => at.elapsed() > self.cache_ttl,
             None => true,
         }
     }
@@ -113,7 +119,7 @@ impl OAuthValidator {
     async fn refresh_keys(&self) -> Result<()> {
         let jwks: JwkSet = self
             .client
-            .get(&self.settings.jwks_url)
+            .get(&self.jwks_url)
             .send()
             .await
             .context("failed to request JWKS")?
@@ -149,11 +155,14 @@ impl OAuthValidator {
     /// Test-only constructor that injects a decoding key directly, bypassing the
     /// network so token validation can be exercised offline.
     #[cfg(test)]
-    fn with_static_key(settings: OAuthSettings, kid: &str, key: DecodingKey) -> Self {
+    fn with_static_key(issuer: String, audience: String, kid: &str, key: DecodingKey) -> Self {
         let mut keys = HashMap::new();
         keys.insert(kid.to_owned(), Arc::new(key));
         Self {
-            settings,
+            issuer,
+            audience,
+            jwks_url: "https://unused.example/jwks".to_owned(),
+            cache_ttl: Duration::from_secs(300),
             client: Client::new(),
             keys: RwLock::new(keys),
             last_refresh: RwLock::new(Some(Instant::now())),
@@ -207,19 +216,12 @@ mod tests {
 
     const SECRET: &[u8] = b"serval-test-shared-secret";
     const KID: &str = "test-key";
+    const ISSUER: &str = "https://issuer.example";
+    const AUDIENCE: &str = "serval";
 
-    fn settings() -> OAuthSettings {
-        OAuthSettings {
-            issuer: "https://issuer.example".to_owned(),
-            audience: "serval".to_owned(),
-            jwks_url: "https://unused.example/jwks".to_owned(),
-            jwks_cache_ttl: Duration::from_secs(300),
-        }
-    }
-
-    fn validator() -> OAuthValidator {
+    fn validator() -> JwtValidator {
         let key = DecodingKey::from_secret(SECRET);
-        OAuthValidator::with_static_key(settings(), KID, key)
+        JwtValidator::with_static_key(ISSUER.to_owned(), AUDIENCE.to_owned(), KID, key)
     }
 
     fn mint(claims: serde_json::Value) -> String {
@@ -237,8 +239,8 @@ mod tests {
         let token = mint(json!({
             "sub": "user-123",
             "email": "u@example.com",
-            "iss": "https://issuer.example",
-            "aud": "serval",
+            "iss": ISSUER,
+            "aud": AUDIENCE,
             "exp": future_exp(),
         }));
         let claims = validator().validate(&token).await.unwrap();
@@ -250,8 +252,8 @@ mod tests {
     async fn rejects_expired_token() {
         let token = mint(json!({
             "sub": "user-123",
-            "iss": "https://issuer.example",
-            "aud": "serval",
+            "iss": ISSUER,
+            "aud": AUDIENCE,
             "exp": (chrono::Utc::now() - chrono::Duration::hours(1)).timestamp(),
         }));
         assert!(validator().validate(&token).await.is_err());
@@ -261,8 +263,19 @@ mod tests {
     async fn rejects_wrong_audience() {
         let token = mint(json!({
             "sub": "user-123",
-            "iss": "https://issuer.example",
+            "iss": ISSUER,
             "aud": "some-other-service",
+            "exp": future_exp(),
+        }));
+        assert!(validator().validate(&token).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn rejects_wrong_issuer() {
+        let token = mint(json!({
+            "sub": "user-123",
+            "iss": "https://evil.example",
+            "aud": AUDIENCE,
             "exp": future_exp(),
         }));
         assert!(validator().validate(&token).await.is_err());
@@ -272,8 +285,8 @@ mod tests {
     async fn rejects_token_missing_exp() {
         let token = mint(json!({
             "sub": "user-123",
-            "iss": "https://issuer.example",
-            "aud": "serval",
+            "iss": ISSUER,
+            "aud": AUDIENCE,
         }));
         assert!(
             validator().validate(&token).await.is_err(),
@@ -291,8 +304,8 @@ mod tests {
             &header,
             &json!({
                 "sub": "x",
-                "iss": "https://issuer.example",
-                "aud": "serval",
+                "iss": ISSUER,
+                "aud": AUDIENCE,
                 "exp": future_exp(),
             }),
             &EncodingKey::from_secret(SECRET),

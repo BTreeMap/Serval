@@ -1,10 +1,12 @@
 import { createContext, useContext } from "react";
-import type { Me } from "./api";
+import type { AuthMode, Me } from "./api";
 
 /** Shared authentication state exposed to the whole app. */
 export interface AuthState {
     /** The authenticated caller, or `null` while loading / when signed out. */
     me: Me | null;
+    /** The backend's auth mode, or `null` until the initial probe resolves. */
+    mode: AuthMode | null;
     /** True while the initial identity probe is in flight. */
     loading: boolean;
     /** Replace the active bearer token and re-probe identity. */

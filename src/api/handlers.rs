@@ -82,6 +82,22 @@ pub struct MeResponse {
     pub is_admin: bool,
 }
 
+/// Public auth metadata so the dashboard can pick the right sign-in flow
+/// without first authenticating.
+#[derive(Debug, Serialize)]
+pub struct AuthInfoResponse {
+    /// The active mode: `none`, `oauth`, or `cloudflare`.
+    pub mode: &'static str,
+}
+
+/// `GET /api/auth-info` — report the configured auth mode. Unauthenticated: the
+/// sign-in screen needs this *before* it can present credentials.
+pub async fn auth_info(State(state): State<ControlState>) -> Json<AuthInfoResponse> {
+    Json(AuthInfoResponse {
+        mode: state.auth.mode().as_str(),
+    })
+}
+
 /// `GET /api/me` — report the authenticated caller.
 pub async fn me(caller: Caller) -> Json<MeResponse> {
     Json(MeResponse {

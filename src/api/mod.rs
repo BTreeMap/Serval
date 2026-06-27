@@ -22,6 +22,7 @@ pub fn router(state: ControlState) -> Router {
     let cors = CorsLayer::permissive();
 
     Router::new()
+        .route("/api/auth-info", get(handlers::auth_info))
         .route("/api/me", get(handlers::me))
         .route(
             "/api/snippets",

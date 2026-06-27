@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
-use crate::auth::{AuthConfig, AuthMode, OAuthSettings};
+use crate::auth::{AuthConfig, AuthMode, CloudflareSettings, OAuthSettings};
 
 /// Fully resolved runtime configuration.
 pub struct Config {
@@ -82,13 +82,16 @@ fn load_id_secret() -> Result<String> {
     Ok(secret)
 }
 
-/// Resolve the auth configuration, requiring complete OAuth settings only when
-/// `AUTH_MODE=oauth`.
+/// Resolve the auth configuration, requiring complete provider settings only
+/// for the selected mode.
 fn load_auth() -> Result<AuthConfig> {
     let mode = match env("AUTH_MODE").as_deref() {
         None | Some("none") => AuthMode::None,
         Some("oauth") => AuthMode::Oauth,
-        Some(other) => bail!("AUTH_MODE must be 'none' or 'oauth', got '{other}'"),
+        Some("cloudflare") => AuthMode::Cloudflare,
+        Some(other) => {
+            bail!("AUTH_MODE must be 'none', 'oauth', or 'cloudflare', got '{other}'")
+        }
     };
 
     match mode {
@@ -107,6 +110,21 @@ fn load_auth() -> Result<AuthConfig> {
                 audience,
                 jwks_url,
                 jwks_cache_ttl,
+            }))
+        }
+        AuthMode::Cloudflare => {
+            let team_domain = require("CLOUDFLARE_TEAM_DOMAIN")
+                .context("AUTH_MODE=cloudflare requires CLOUDFLARE_TEAM_DOMAIN")?;
+            let audience = require("CLOUDFLARE_AUDIENCE")
+                .context("AUTH_MODE=cloudflare requires CLOUDFLARE_AUDIENCE")?;
+            // Access certs rotate slowly; clamp to at least an hour to avoid
+            // hammering the edge while staying ahead of rotations.
+            let certs_cache_ttl =
+                Duration::from_secs(parse_or("CLOUDFLARE_CERTS_CACHE_TTL_SECS", 86400)?.max(3600));
+            Ok(AuthConfig::Cloudflare(CloudflareSettings {
+                team_domain,
+                audience,
+                certs_cache_ttl,
             }))
         }
     }
