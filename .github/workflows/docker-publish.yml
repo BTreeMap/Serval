@@ -54,6 +54,13 @@ jobs:
           # For workflow_run events, build the exact commit CI validated.
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
+      - name: Normalize image name
+        # GHCR requires a lowercase repository path; github.repository may be
+        # mixed-case (e.g. BTreeMap/Serval), so downcase it for every ref below.
+        run: echo "IMAGE_NAME=${IMAGE_NAME,,}" >> "$GITHUB_ENV"
+        env:
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+
       - name: Prepare platform pair
         run: echo "PLATFORM_PAIR=${PLATFORM//\//-}" >> "$GITHUB_ENV"
         env:
@@ -110,6 +117,13 @@ jobs:
       packages: write
 
     steps:
+      - name: Normalize image name
+        # GHCR requires a lowercase repository path; github.repository may be
+        # mixed-case (e.g. BTreeMap/Serval), so downcase it for every ref below.
+        run: echo "IMAGE_NAME=${IMAGE_NAME,,}" >> "$GITHUB_ENV"
+        env:
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+
       - name: Download digests
         uses: actions/download-artifact@v4
         with:
