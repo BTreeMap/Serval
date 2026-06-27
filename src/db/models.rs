@@ -4,8 +4,12 @@
 //! constructed unless it is exactly [`crypto::ID_LEN`] URL-safe Base64
 //! characters, so the Data Plane's `id.len() != 64` rejection is enforced once
 //! at the boundary rather than re-checked everywhere downstream.
+//!
+//! Route ids are *minted and signed* by [`crypto::IdSigner`], not here: the
+//! signer owns the 32-byte-prefix + 16-byte-MAC construction. This module only
+//! validates the character shape; the MAC is verified at the delivery boundary.
 
-use crate::crypto::{self, ID_LEN};
+use crate::crypto::ID_LEN;
 
 /// A validated 64-character route id (mutable alias or immutable permalink).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -35,10 +39,14 @@ impl RouteId {
         Ok(Self(raw.to_owned()))
     }
 
-    /// Construct a fresh, random alias id. Always valid by construction.
+    /// Adopt a freshly-minted, already-signed id from [`crypto::IdSigner`].
+    ///
+    /// The signer guarantees a valid 64-char URL-safe id, so this skips
+    /// re-validation. Use [`RouteId::parse`] for any untrusted input instead.
     #[must_use]
-    pub fn new_alias() -> Self {
-        Self(crypto::generate_alias_id())
+    pub fn from_signed(id: String) -> Self {
+        debug_assert_eq!(id.len(), ID_LEN, "signer must emit {ID_LEN}-char ids");
+        Self(id)
     }
 
     /// Borrow the id as a string slice.
@@ -60,19 +68,23 @@ impl std::fmt::Display for RouteId {
     }
 }
 
-/// A validated content address: `Base64URL(SHA3-384(content))`.
+/// A validated content address: `BLAKE3(content) || keyed-MAC`, URL-safe Base64
+/// encoded to exactly [`ID_LEN`] characters.
 ///
-/// Constructed only by hashing content, so it is always exactly [`ID_LEN`]
-/// characters and is, by definition, the id of the corresponding immutable
-/// permalink.
+/// This is the immutable `content_blocks.hash_id` — the CAS dedup key — and it
+/// shares the one id format: it is itself a valid, MAC-signed route id (the id
+/// of the corresponding immutable permalink). Minted by [`crypto::IdSigner`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ContentHash(String);
 
 impl ContentHash {
-    /// Compute the content address of `content`.
+    /// Adopt a freshly-minted content id from [`crypto::IdSigner::content_id`].
+    ///
+    /// The signer guarantees a valid 64-char id, so this skips re-validation.
     #[must_use]
-    pub fn of(content: &str) -> Self {
-        Self(crypto::hash_content(content))
+    pub fn from_signed(id: String) -> Self {
+        debug_assert_eq!(id.len(), ID_LEN, "signer must emit {ID_LEN}-char ids");
+        Self(id)
     }
 
     /// Borrow the hash as a string slice.
@@ -85,12 +97,6 @@ impl ContentHash {
     #[must_use]
     pub fn into_inner(self) -> String {
         self.0
-    }
-
-    /// The immutable permalink route id for this content (identical value).
-    #[must_use]
-    pub fn to_route_id(&self) -> RouteId {
-        RouteId(self.0.clone())
     }
 }
 
@@ -196,6 +202,7 @@ pub struct User {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto;
 
     #[test]
     fn route_id_rejects_wrong_length() {
@@ -215,16 +222,35 @@ mod tests {
     }
 
     #[test]
-    fn route_id_accepts_valid_alias() {
-        let alias = RouteId::new_alias();
-        let reparsed = RouteId::parse(alias.as_str()).expect("alias must reparse");
-        assert_eq!(alias, reparsed);
+    fn route_id_accepts_signed_id() {
+        let signer = crypto::IdSigner::new("test-secret");
+        let signed = signer.random_id();
+        let reparsed = RouteId::parse(&signed).expect("signed id must reparse");
+        assert_eq!(reparsed.as_str(), signed);
+    }
+
+    #[test]
+    fn from_signed_adopts_minted_id() {
+        let signer = crypto::IdSigner::new("test-secret");
+        let signed = signer.content_id("permalink content");
+        let id = RouteId::from_signed(signed.clone());
+        assert_eq!(id.as_str(), signed);
+    }
+
+    #[test]
+    fn content_hash_is_64_chars() {
+        let signer = crypto::IdSigner::new("test-secret");
+        let hash = ContentHash::from_signed(signer.content_id("permalink content"));
+        assert_eq!(hash.as_str().len(), ID_LEN);
     }
 
     #[test]
     fn permalink_id_equals_content_hash() {
-        let hash = ContentHash::of("permalink content");
-        let route = hash.to_route_id();
+        // Unified format: an immutable permalink's route id IS its content hash.
+        let signer = crypto::IdSigner::new("test-secret");
+        let content_id = signer.content_id("permalink content");
+        let hash = ContentHash::from_signed(content_id.clone());
+        let route = RouteId::from_signed(content_id);
         assert_eq!(route.as_str(), hash.as_str());
     }
 

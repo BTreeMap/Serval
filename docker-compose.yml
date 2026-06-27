@@ -30,6 +30,9 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: postgres://serval:serval@postgres:5432/serval
+      # Route-id MAC secret. Override with a strong random value in production;
+      # the default below is for local/dev only (must be >= 32 chars).
+      ID_SIGNING_SECRET: ${ID_SIGNING_SECRET:-dev-only-insecure-id-signing-secret-change-me}
       CONTROL_PLANE_ADDR: 0.0.0.0:8080
       DATA_PLANE_ADDR: 0.0.0.0:3000
       AUTH_MODE: none

@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 use serval::api;
 use serval::auth::{AuthConfig, AuthService};
 use serval::cache::DeliveryCache;
+use serval::crypto::IdSigner;
 use serval::db::{self, Repository};
 use serval::delivery;
 use serval::state::{ControlState, DeliveryState};
@@ -27,12 +28,16 @@ use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
 use tokio::net::TcpListener;
 
+/// Deployment secret used by the test harness to key the route-id MAC.
+const TEST_ID_SECRET: &str = "acceptance-suite-id-signing-secret-please";
+
 /// A running Serval under test: both plane base URLs plus the container guard
 /// (dropping it tears down PostgreSQL).
 struct Harness {
     control_base: String,
     data_base: String,
     client: reqwest::Client,
+    signer: IdSigner,
     _pg: ContainerAsync<Postgres>,
 }
 
@@ -57,6 +62,8 @@ impl Harness {
 
         // The single shared cache is the crux of acceptance criterion #1.
         let cache = DeliveryCache::new(32 * 1024 * 1024, Duration::from_secs(300));
+        // One signer shared by both planes, exactly as the binary wires it.
+        let signer = IdSigner::new(TEST_ID_SECRET);
         let auth = Arc::new(
             AuthService::new(AuthConfig::None)
                 .await
@@ -67,8 +74,13 @@ impl Harness {
             repo: repo.clone(),
             cache: cache.clone(),
             auth,
+            signer: signer.clone(),
         };
-        let data_state = DeliveryState { repo, cache };
+        let data_state = DeliveryState {
+            repo,
+            cache,
+            signer: signer.clone(),
+        };
 
         let control_base = serve(api::router(control_state)).await;
         let data_base = serve(delivery::router(data_state)).await;
@@ -77,6 +89,7 @@ impl Harness {
             control_base,
             data_base,
             client: reqwest::Client::new(),
+            signer,
             _pg: pg,
         }
     }
@@ -147,6 +160,17 @@ impl Harness {
         let body = resp.text().await.expect("delivery body");
         (body, headers)
     }
+
+    /// `GET {data}/{path}` returning only the HTTP status, without asserting
+    /// success — used to prove forged ids are rejected.
+    async fn deliver_status(&self, path: &str) -> reqwest::StatusCode {
+        self.client
+            .get(format!("{}/{path}", self.data_base))
+            .send()
+            .await
+            .expect("delivery request")
+            .status()
+    }
 }
 
 /// Bind an ephemeral loopback port and serve `router` on it in a task.
@@ -199,21 +223,23 @@ async fn tolerant_rendering() {
     assert_eq!(body, "{{uuid}} on 8080");
 }
 
-/// Acceptance criterion #3: an immutable permalink's id is exactly
-/// `Base64URL(SHA3-384(content))` — deterministic and extension-independent.
+/// Acceptance criterion #3: an immutable permalink's id is exactly the signed
+/// content id `Base64URL(BLAKE3(content) || keyed-MAC)` — deterministic under
+/// the deployment secret and extension-independent.
 #[tokio::test]
 async fn permalink_purity() {
     let h = Harness::start().await;
 
     let content = "deterministic content";
-    let expected = serval::crypto::hash_content(content);
+    let expected = h.signer.content_id(content);
 
     let first = h
         .create(json!({ "content": content, "immutable": true }))
         .await;
     let id = first["id"].as_str().expect("id").to_owned();
     assert_eq!(id.len(), 64);
-    assert_eq!(id, expected, "permalink id is not the content hash");
+    assert_eq!(id, expected, "permalink id is not the signed content id");
+    assert!(h.signer.verify(&id), "permalink id must carry a valid MAC");
     assert_eq!(first["immutable"], json!(true));
 
     // Re-creating identical content yields the identical id.
@@ -229,6 +255,40 @@ async fn permalink_purity() {
         headers.get("content-type").and_then(|v| v.to_str().ok()),
         Some("application/json")
     );
+}
+
+/// DoS mitigation: the Data Plane rejects ids that do not carry a valid keyed
+/// MAC — forged, enumerated, or signed by a different secret — with `404`,
+/// before any cache or database lookup. A genuine alias still serves `200`.
+#[tokio::test]
+async fn forged_ids_are_rejected_by_the_data_plane() {
+    let h = Harness::start().await;
+
+    // A well-formed 64-char id whose prefix is attacker-chosen but whose MAC is
+    // wrong (all 'A's): correct shape, invalid signature.
+    let forged = "A".repeat(64);
+    assert_eq!(
+        h.deliver_status(&forged).await,
+        reqwest::StatusCode::NOT_FOUND,
+        "an id with an invalid MAC must be rejected"
+    );
+
+    // An id minted under a different secret must also fail verification here.
+    let alien = IdSigner::new("a-totally-different-deployment-secret-xx").random_id();
+    assert_eq!(
+        h.deliver_status(&alien).await,
+        reqwest::StatusCode::NOT_FOUND,
+        "an id signed by another secret must be rejected"
+    );
+
+    // A genuine, signed alias is admitted and served.
+    let created = h
+        .create(json!({ "content": "genuine", "immutable": false }))
+        .await;
+    let id = created["id"].as_str().expect("id");
+    assert!(h.signer.verify(id), "harness must mint valid ids");
+    let (body, _) = h.deliver(id).await;
+    assert_eq!(body, "genuine");
 }
 
 /// Acceptance criterion #4: 100 updates to an alias yield exactly 101

@@ -12,6 +12,7 @@ use tokio::signal;
 use serval::auth::AuthService;
 use serval::cache::DeliveryCache;
 use serval::config::Config;
+use serval::crypto;
 use serval::db::{self, Repository};
 use serval::state::{ControlState, DeliveryState};
 use serval::{api, delivery};
@@ -73,6 +74,9 @@ async fn serve(config: Config, repo: Repository) -> Result<()> {
     // One cache handle is shared by both planes: a Control Plane write evicts
     // exactly what a Data Plane read would load.
     let cache = DeliveryCache::new(config.cache_byte_budget, config.cache_mutable_ttl);
+    // One signer derived from the deployment secret: the Control Plane mints
+    // signed ids, the Data Plane verifies them. Both must share the same key.
+    let signer = crypto::IdSigner::new(&config.id_secret);
     let auth = std::sync::Arc::new(
         AuthService::new(config.auth)
             .await
@@ -83,8 +87,13 @@ async fn serve(config: Config, repo: Repository) -> Result<()> {
         repo: repo.clone(),
         cache: cache.clone(),
         auth,
+        signer: signer.clone(),
     };
-    let delivery_state = DeliveryState { repo, cache };
+    let delivery_state = DeliveryState {
+        repo,
+        cache,
+        signer,
+    };
 
     let control_app = api::router(control_state);
     let delivery_app = delivery::router(delivery_state);

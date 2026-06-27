@@ -59,8 +59,10 @@ PostgreSQL integration tests:
 2. **Tolerant rendering.** `GET /?port=8080` for a snippet containing `{{uuid}}`
    and `{{port}}` returns the port substituted and the literal `{{uuid}}`
    intact.
-3. **Untyped permalink purity.** Immutable permalink creation yields a 64-char
-   id derived only from `Base64URL(SHA3-384(content))` — identical text always
-   gives the identical URL, regardless of extension or MIME type.
+3. **Permalink purity.** Immutable permalink creation yields a 64-char id equal
+   to the signed content id `Base64URL(BLAKE3(content) || keyed-MAC)` —
+   identical text always gives the identical URL under a fixed deployment
+   secret, regardless of extension or MIME type. (The Data Plane also rejects
+   any id whose MAC fails verification with a `404`, before any cache/DB work.)
 4. **Infinite ledger.** Modifying an alias 100 times yields exactly 101
    `pointer_history` rows, with no pruning.

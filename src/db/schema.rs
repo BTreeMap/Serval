@@ -17,7 +17,8 @@ use sqlx::PgPool;
 
 /// Apply the full schema. Safe to call on every startup.
 pub async fn apply(pool: &PgPool) -> Result<(), sqlx::Error> {
-    // Immutable blob layer. Addressed strictly by Base64URL(SHA3-384(content)).
+    // Immutable blob layer. Addressed by a signed content id:
+    // Base64URL(BLAKE3(content) || keyed-MAC), 64 chars.
     sqlx::query(
         r"
         CREATE TABLE IF NOT EXISTS content_blocks (

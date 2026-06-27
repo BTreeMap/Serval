@@ -65,6 +65,14 @@ async fn deliver(
         return StatusCode::NOT_FOUND.into_response();
     };
 
+    // Stateless admission gate: a valid id carries a keyed MAC over its prefix.
+    // Forged or enumerated ids fail this constant-time check and are rejected
+    // here — before any cache or database work — collapsing the DoS
+    // amplification vector. Still indistinguishable from "not found".
+    if !state.signer.verify(raw_id) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
     let repo = state.repo.clone();
     let load_id = id.clone();
     let loaded = state

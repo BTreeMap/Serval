@@ -149,6 +149,7 @@ mod tests {
     use std::convert::Infallible;
 
     use super::*;
+    use crate::crypto::IdSigner;
 
     fn snippet(content: &str, mode: CacheMode) -> CachedSnippet {
         CachedSnippet {
@@ -156,6 +157,12 @@ mod tests {
             content_type: Arc::from("text/plain; charset=utf-8"),
             cache_mode: mode,
         }
+    }
+
+    /// Mint a fresh, valid signed route id for cache-keying in tests.
+    fn test_id() -> RouteId {
+        let signer = IdSigner::new("cache-test-secret-cache-test-secret");
+        RouteId::from_signed(signer.random_id())
     }
 
     /// A loader error used to exercise the not-found / failure paths.
@@ -173,7 +180,7 @@ mod tests {
     #[tokio::test]
     async fn miss_then_hit_loads_once() {
         let cache = DeliveryCache::new(1 << 20, Duration::from_secs(300));
-        let id = RouteId::new_alias();
+        let id = test_id();
 
         let first = cache
             .get_or_load(
@@ -200,7 +207,7 @@ mod tests {
     #[tokio::test]
     async fn invalidate_forces_reload() {
         let cache = DeliveryCache::new(1 << 20, Duration::from_secs(300));
-        let id = RouteId::new_alias();
+        let id = test_id();
 
         cache
             .get_or_load(&id, ok_loader(snippet("v1", CacheMode::Mutable)).await)
@@ -218,7 +225,7 @@ mod tests {
     #[tokio::test]
     async fn errors_are_not_cached() {
         let cache = DeliveryCache::new(1 << 20, Duration::from_secs(300));
-        let id = RouteId::new_alias();
+        let id = test_id();
 
         // First load fails (e.g. route not found) — must not be cached.
         let err = cache
@@ -248,7 +255,7 @@ mod tests {
         let big = "x".repeat(1_000);
 
         for _ in 0..10 {
-            let id = RouteId::new_alias();
+            let id = test_id();
             cache
                 .get_or_load(&id, ok_loader(snippet(&big, CacheMode::Immutable)).await)
                 .await

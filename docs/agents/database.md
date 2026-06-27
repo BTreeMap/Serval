@@ -18,24 +18,31 @@ Three tables separate heavy content, active routing, and the audit trail.
 
 | Column | Type | Constraints | Notes |
 |---|---|---|---|
-| `hash_id` | `VARCHAR(64)` | PRIMARY KEY | `Base64URL(SHA3-384(content))`, no pad |
+| `hash_id` | `VARCHAR(64)` | PRIMARY KEY | Signed content id: `Base64URL(BLAKE3(content) \|\| keyed-MAC)`, 64 chars |
 | `content` | `TEXT` | NOT NULL | The heavy 20KB+ payload |
 
 Pure deduplication: identical content is stored exactly once. Blocks are
 **write-once** — inserted with `ON CONFLICT DO NOTHING`, never updated or
-deleted.
+deleted. The `hash_id` is itself a valid, MAC-signed route id — a content
+address is directly servable as its immutable permalink.
 
 ### `routes` — the active routing layer
 
 | Column | Type | Constraints | Notes |
 |---|---|---|---|
-| `id` | `VARCHAR(64)` | PRIMARY KEY | 64-char URL-safe Base64 (alias or permalink) |
+| `id` | `VARCHAR(64)` | PRIMARY KEY | 64-char signed id: 32-byte prefix + 16-byte keyed MAC (alias or permalink) |
 | `target_hash` | `VARCHAR(64)` | FK → `content_blocks` | Pointer to current payload |
 | `content_type` | `VARCHAR(255)` | NOT NULL | Default `text/plain; charset=utf-8` |
 | `cache_mode` | `SMALLINT` | NOT NULL | `0` = mutable (short TTL), `1` = immutable (edge-cached) |
 | `owner_id` | `VARCHAR(255)` | NULL | Authenticated creator |
 
-For an **immutable permalink**, `id == target_hash` — the content hash itself.
+One id format covers both kinds: every id is `prefix || MAC`, where `MAC =
+BLAKE3::keyed_hash(key, prefix)` truncated to 16 bytes and `key` is derived from
+the deployment-wide `ID_SIGNING_SECRET`. For an **immutable permalink** the
+prefix is `BLAKE3(content)`, so `id == target_hash` — the content hash itself.
+For a **mutable alias** the prefix is 32 CSPRNG bytes. The MAC is recomputed
+and verified on every Data Plane read (see
+[delivery.md](delivery.md)); it is never stored.
 
 ### `pointer_history` — the append-only version ledger
 
@@ -62,7 +69,8 @@ applied. Creating a route appends version 1; each `PATCH` appends one row.
 4. **Preserve the core invariants:**
    - `content_blocks` stays immutable and content-addressed.
    - `pointer_history` stays append-only with no pruning.
-   - Permalink `id` stays equal to `Base64URL(SHA3-384(content))`.
+   - Permalink `id` stays equal to the signed content id
+     `Base64URL(BLAKE3(content) || keyed-MAC)`.
 5. **Validate on a live PostgreSQL 16+ instance** via the Dockerized
    integration suite (see [testing.md](testing.md)) before declaring done.
 

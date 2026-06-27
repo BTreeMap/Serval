@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use crate::auth::AuthService;
 use crate::cache::DeliveryCache;
+use crate::crypto::IdSigner;
 use crate::db::Repository;
 
 /// State for the Control Plane (management API + embedded UI).
@@ -18,6 +19,8 @@ pub struct ControlState {
     pub repo: Repository,
     pub cache: DeliveryCache,
     pub auth: Arc<AuthService>,
+    /// Mints signed route ids for newly created snippets.
+    pub signer: IdSigner,
 }
 
 /// State for the Data Plane (public delivery).
@@ -25,4 +28,6 @@ pub struct ControlState {
 pub struct DeliveryState {
     pub repo: Repository,
     pub cache: DeliveryCache,
+    /// Verifies the route-id MAC before any cache or database lookup.
+    pub signer: IdSigner,
 }

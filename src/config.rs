@@ -19,8 +19,16 @@ pub struct Config {
     pub data_plane_addr: SocketAddr,
     pub cache_byte_budget: u64,
     pub cache_mutable_ttl: Duration,
+    /// Deployment-wide secret salt for the route-id MAC. Keep it stable across
+    /// a deployment (rotating it invalidates every existing permalink/alias)
+    /// and never log it.
+    pub id_secret: String,
     pub auth: AuthConfig,
 }
+
+/// Minimum accepted length for `ID_SIGNING_SECRET`. A short secret undermines
+/// the MAC's unforgeability, so we refuse to boot below this bar.
+const MIN_ID_SECRET_LEN: usize = 32;
 
 impl Config {
     /// Load and validate configuration from environment variables, applying
@@ -40,6 +48,8 @@ impl Config {
         let cache_byte_budget = parse_or("CACHE_BYTE_BUDGET", 32 * 1024 * 1024)?;
         let cache_mutable_ttl = Duration::from_secs(parse_or("CACHE_MUTABLE_TTL_SECS", 300)?);
 
+        let id_secret = load_id_secret()?;
+
         let auth = load_auth()?;
 
         Ok(Self {
@@ -49,9 +59,27 @@ impl Config {
             data_plane_addr,
             cache_byte_budget,
             cache_mutable_ttl,
+            id_secret,
             auth,
         })
     }
+}
+
+/// Load the route-id signing secret, enforcing a minimum length so a weak salt
+/// cannot silently degrade the DoS mitigation.
+fn load_id_secret() -> Result<String> {
+    let secret = require("ID_SIGNING_SECRET").context(
+        "ID_SIGNING_SECRET is required: it keys the route-id MAC that shields \
+         the Data Plane from enumeration",
+    )?;
+    if secret.len() < MIN_ID_SECRET_LEN {
+        bail!(
+            "ID_SIGNING_SECRET must be at least {MIN_ID_SECRET_LEN} characters \
+             (got {})",
+            secret.len()
+        );
+    }
+    Ok(secret)
 }
 
 /// Resolve the auth configuration, requiring complete OAuth settings only when

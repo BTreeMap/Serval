@@ -89,13 +89,16 @@ impl Repository {
 
     /// Repoint an existing mutable route at new content, appending one row to
     /// the history ledger. Returns `Ok(false)` if the route does not exist.
+    ///
+    /// `hash` is the caller-computed content id (`signer.content_id(content)`);
+    /// the repository stays key-free and never derives ids itself.
     pub async fn update_route(
         &self,
         id: &RouteId,
+        hash: &ContentHash,
         content: &str,
         editor_id: &str,
     ) -> Result<bool, sqlx::Error> {
-        let hash = ContentHash::of(content);
         let mut tx = self.pool.begin().await?;
 
         sqlx::query(
@@ -118,7 +121,7 @@ impl Repository {
             return Ok(false);
         }
 
-        self.append_history(&mut tx, id, &hash, editor_id).await?;
+        self.append_history(&mut tx, id, hash, editor_id).await?;
 
         tx.commit().await?;
         Ok(true)

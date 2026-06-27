@@ -11,19 +11,25 @@ telemetry or analytics state — it is intentionally stateless beyond the cache.
 ## Execution flow (GET only)
 
 1. Parse query-string variables. **Reject requests where `id.len() != 64`.**
-2. Look up the `moka` cache for the `(content, content_type, cache_mode)` tuple
+2. **Verify the route-id MAC** (`state.signer.verify(id)`). A valid id is
+   `prefix || BLAKE3::keyed_hash(key, prefix)[..16]`; a forged or enumerated id
+   fails this constant-time check and is rejected with `404` **before any cache
+   or database work**. This stateless admission gate is the DoS mitigation — an
+   attacker without the deployment secret cannot mint an id that reaches
+   PostgreSQL. The rejection is indistinguishable from "not found".
+3. Look up the `moka` cache for the `(content, content_type, cache_mode)` tuple
    keyed by `id`.
-3. On miss, run the index join and store the result in `moka`:
+4. On miss, run the index join and store the result in `moka`:
    ```sql
    SELECT c.content, r.content_type, r.cache_mode
    FROM routes r
    INNER JOIN content_blocks c ON c.hash_id = r.target_hash
    WHERE r.id = $1;
    ```
-4. Resolve the MIME type from the `*filename` extension via `mime_guess`,
+5. Resolve the MIME type from the `*filename` extension via `mime_guess`,
    falling back to the database `content_type`.
-5. Render the content with the query variables through `renderer.rs`.
-6. Return `200 OK` with a `Cache-Control` header derived from `cache_mode`
+6. Render the content with the query variables through `renderer.rs`.
+7. Return `200 OK` with a `Cache-Control` header derived from `cache_mode`
    (`0` = mutable/short TTL, `1` = immutable/edge-cached).
 
 ## Cache constraints
@@ -53,9 +59,26 @@ must reflect the new content (acceptance criterion #1).
 
 ## Cryptography (`src/crypto.rs`)
 
-- `generate_alias_id() -> String`: 48 CSPRNG bytes → URL-safe Base64, no pad.
-- `hash_content(content: &str) -> String`: `SHA3-384(content)` → URL-safe
-  Base64, no pad. This single value is both the `content_blocks.hash_id` and the
-  `routes.id` of an immutable permalink — so identical text always yields the
-  identical permalink URL, regardless of requested extension or MIME type
-  (acceptance criterion #3).
+One hash family — **BLAKE3** — backs both content addressing and the route-id
+MAC. Every id is exactly 48 bytes (64 URL-safe Base64 chars, no pad) split into
+a **32-byte prefix** and a **16-byte keyed MAC**.
+
+- `IdSigner::new(secret)`: derives the 256-bit MAC key from `ID_SIGNING_SECRET`
+  via `blake3::derive_key`. Both planes construct one signer from the same
+  secret — the Control Plane mints ids, the Data Plane verifies them.
+- `IdSigner::content_id(content) -> String`: `prefix = BLAKE3(content)`, then
+  `prefix || MAC(prefix)`. This single value is both the
+  `content_blocks.hash_id` and the `routes.id` of an immutable permalink, so
+  identical text always yields the identical permalink URL under a fixed secret,
+  regardless of requested extension or MIME type (acceptance criterion #3).
+- `IdSigner::random_id() -> String`: `prefix =` 32 CSPRNG bytes, for a mutable
+  alias.
+- `IdSigner::verify(id) -> bool`: recomputes the MAC over the prefix and
+  compares in constant time. The Data Plane calls this before any cache/DB
+  lookup; a `false` result is a `404`.
+
+`MAC = BLAKE3::keyed_hash(key, prefix)` truncated to 128 bits. BLAKE3's native
+keyed mode is length-extension resistant, so no HMAC wrapper is needed, and
+truncation does not weaken the surviving bits — forging a tag still costs
+`2^128` work. Rotating `ID_SIGNING_SECRET` (or the `derive_key` context string)
+invalidates every existing id deployment-wide.

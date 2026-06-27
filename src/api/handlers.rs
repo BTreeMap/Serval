@@ -117,11 +117,19 @@ pub async fn create_snippet(
 ) -> Result<(StatusCode, Json<SnippetResponse>), ApiError> {
     let content_type = normalize_content_type(req.content_type)?;
 
-    let hash = ContentHash::of(&req.content);
+    // Mint the signed content id once: it is the content-block key and, for an
+    // immutable permalink, the route id itself (one unified id format).
+    let hash = ContentHash::from_signed(state.signer.content_id(&req.content));
     let (id, cache_mode) = if req.immutable {
-        (hash.to_route_id(), CacheMode::Immutable)
+        (
+            RouteId::from_signed(hash.as_str().to_owned()),
+            CacheMode::Immutable,
+        )
     } else {
-        (RouteId::new_alias(), CacheMode::Mutable)
+        (
+            RouteId::from_signed(state.signer.random_id()),
+            CacheMode::Mutable,
+        )
     };
 
     let inserted = state
@@ -193,7 +201,12 @@ pub async fn update_snippet(
 
     let updated = state
         .repo
-        .update_route(&id, &req.content, &caller.user_id)
+        .update_route(
+            &id,
+            &ContentHash::from_signed(state.signer.content_id(&req.content)),
+            &req.content,
+            &caller.user_id,
+        )
         .await?;
     if !updated {
         return Err(ApiError::NotFound);

@@ -41,11 +41,16 @@ Full test / E2E / Dockerized PostgreSQL commands →
   idempotent, data-preserving PostgreSQL migration. Data integrity is the one
   hard exception to "ruthless refactoring".
 - **Never mutate content blocks.** `content_blocks` is immutable and addressed
-  strictly by `Base64URL(SHA3-384(content))`. Insert with `ON CONFLICT DO
-  NOTHING`; never update or delete a stored block.
-- **Never weaken permalink purity.** An immutable permalink's `route_id` is
-  exactly the content hash — deterministic and independent of extension or MIME
-  type. Do not derive it from anything else.
+  by a signed content id — `Base64URL(BLAKE3(content) || keyed-MAC)`. Insert with
+  `ON CONFLICT DO NOTHING`; never update or delete a stored block.
+- **Never weaken permalink purity.** An immutable permalink's `route_id` is the
+  signed content id: `BLAKE3(content)` as the 32-byte prefix plus a keyed MAC —
+  deterministic under the deployment `ID_SIGNING_SECRET` and independent of
+  extension or MIME type. Do not derive the prefix from anything but the content.
+- **Never serve an unverified id.** Every Data Plane read MUST pass the keyed-MAC
+  check (`IdSigner::verify`) before any cache or database lookup; a failed check
+  is a `404`. This stateless gate is the DoS mitigation — do not bypass it or
+  move it after the cache. → [docs/agents/delivery.md](docs/agents/delivery.md).
 - **Always evict the `moka` cache on writes.** A Control Plane `PATCH` MUST
   invalidate the affected `id` in the Data Plane cache so the next GET reflects
   the change. → [docs/agents/delivery.md](docs/agents/delivery.md).

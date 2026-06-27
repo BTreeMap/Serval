@@ -11,11 +11,17 @@ substitution over plain HTTP `GET`.
 ## What it does
 
 - **Pure content-addressed storage (CAS).** Raw templates are stored immutably,
-  keyed by `Base64URL(SHA3-384(content))`. The same 20KB config uploaded 1,000
-  times is stored exactly once — absolute byte-level deduplication.
-- **Immutable permalinks & mutable aliases.** A permalink's URL is the content
-  hash itself (identical text always yields the identical URL). Aliases are
-  mutable pointers you can repoint over time.
+  keyed by a signed content id `Base64URL(BLAKE3(content) || keyed-MAC)`. The
+  same 20KB config uploaded 1,000 times is stored exactly once — absolute
+  byte-level deduplication.
+- **Immutable permalinks & mutable aliases.** A permalink's URL is the signed
+  content id itself (identical text always yields the identical URL under a
+  fixed deployment secret). Aliases are mutable pointers you can repoint over
+  time.
+- **Forgery-proof ids (DoS mitigation).** Every id carries a keyed MAC over its
+  prefix, so the Data Plane rejects forged or enumerated ids with a
+  constant-time check before any cache or database lookup. See
+  [docs/agents/delivery.md](docs/agents/delivery.md).
 - **Tolerant templating.** Snippets use `{{variable}}` placeholders filled from
   standard query parameters (`GET /<id>?port=8080`). Unprovided placeholders are
   left intact as literal text — universally client-compatible, no special
@@ -48,7 +54,8 @@ See [docs/agents/database.md](docs/agents/database.md) for the full schema.
 
 ## Tech stack
 
-- **Backend:** Rust (Axum), PostgreSQL 16+, `moka` cache, SHA3-384 hashing.
+- **Backend:** Rust (Axum), PostgreSQL 16+, `moka` cache, BLAKE3 hashing &
+  keyed-MAC route ids.
 - **Frontend:** React + Vite + TypeScript, embedded via `rust-embed` at build
   time.
 - **Delivery:** stateless by design — no custom telemetry; rely on edge logs.
@@ -62,6 +69,9 @@ git submodule update --init --recursive
 # 2. Run a local PostgreSQL (16+) and point Serval at it
 docker compose up -d postgres
 export DATABASE_URL=postgres://serval:serval@localhost:5432/serval
+
+# Set the route-id signing secret (required; >= 32 chars, keep it stable)
+export ID_SIGNING_SECRET="$(openssl rand -base64 48)"
 
 # 3. Build and run (build.rs builds and embeds frontend/dist/ automatically)
 cargo run --release
@@ -114,6 +124,7 @@ if present). See [.env.example](.env.example) for the full list.
 | Variable | Default | Purpose |
 |---|---|---|
 | `DATABASE_URL` | _required_ | PostgreSQL connection string |
+| `ID_SIGNING_SECRET` | _required_ | Secret salt (>= 32 chars) keying the route-id MAC; keep stable per deployment |
 | `DATABASE_MAX_CONNECTIONS` | `16` | Pool size |
 | `CONTROL_PLANE_ADDR` | `0.0.0.0:8080` | Management API + UI bind address |
 | `DATA_PLANE_ADDR` | `0.0.0.0:3000` | Delivery bind address |
