@@ -60,8 +60,11 @@ base64 = "0.22"
 blake3 = "1"
 subtle = "2"
 
-# Authentication (OAuth/JWT with JWKS)
-jsonwebtoken = { version = "9", features = ["use_pem"] }
+# Authentication (OAuth/JWT with JWKS).
+# jsonwebtoken 10 made the crypto backend pluggable; select aws-lc-rs (the
+# upstream default) to avoid pulling in the unpatched `rsa` crate that the
+# pure-Rust `rust_crypto` backend would require (RUSTSEC-2023-0071).
+jsonwebtoken = { version = "10", features = ["use_pem", "aws_lc_rs"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # Rendering engine
@@ -87,8 +90,8 @@ clap = { version = "4", features = ["derive"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
-testcontainers = "0.23"
-testcontainers-modules = { version = "0.11", features = ["postgres"] }
+testcontainers = "0.27"
+testcontainers-modules = { version = "0.15", features = ["postgres"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [profile.release]
