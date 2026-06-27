@@ -7,4 +7,5 @@
 //! entry point for how the two planes are wired together.
 
 pub mod crypto;
+pub mod db;
 pub mod renderer;
