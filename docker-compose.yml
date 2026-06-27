@@ -1,0 +1,42 @@
+# Local development and integration stack.
+#
+# Brings up PostgreSQL 16 for Serval. Point the app at it with:
+#   export DATABASE_URL=postgres://serval:serval@localhost:5432/serval
+#
+# The optional `serval` service runs the app itself once an image is built.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: serval
+      POSTGRES_PASSWORD: serval
+      POSTGRES_DB: serval
+    ports:
+      - "5432:5432"
+    volumes:
+      - serval-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U serval -d serval"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  serval:
+    build: .
+    profiles: ["app"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://serval:serval@postgres:5432/serval
+      CONTROL_PLANE_ADDR: 0.0.0.0:8080
+      DATA_PLANE_ADDR: 0.0.0.0:3000
+      AUTH_MODE: none
+      RUST_LOG: info
+    ports:
+      - "8080:8080"
+      - "3000:3000"
+
+volumes:
+  serval-pgdata:

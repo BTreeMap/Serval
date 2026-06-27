@@ -1,0 +1,44 @@
+name: Integration Tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: integration-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  acceptance:
+    name: Acceptance suite (ephemeral PostgreSQL 16)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-integration-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-integration-
+
+      # The acceptance suite boots its own ephemeral PostgreSQL via
+      # testcontainers, so only a working Docker daemon is required — which the
+      # ubuntu-latest runner provides out of the box.
+      - name: Run acceptance suite
+        run: cargo test --features integration --test acceptance -- --test-threads=1
+        env:
+          SERVAL_SKIP_FRONTEND_BUILD: "1"

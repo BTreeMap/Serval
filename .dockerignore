@@ -1,0 +1,12 @@
+# Build context excludes — keep the image build fast and reproducible.
+target/
+frontend/node_modules/
+frontend/dist/
+**/*.tsbuildinfo
+.git/
+.github/
+docs/
+.env
+.env.*
+*.md
+!README.md
