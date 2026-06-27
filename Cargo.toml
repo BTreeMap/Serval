@@ -76,6 +76,9 @@ rust-embed = { version = "8", features = ["mime-guess"] }
 # Timestamps
 chrono = { version = "0.4", features = ["serde"] }
 
+# Command-line interface (serve + admin allowlist management)
+clap = { version = "4", features = ["derive"] }
+
 [build-dependencies]
 # build.rs orchestrates the frontend build before embedding frontend/dist/.
 

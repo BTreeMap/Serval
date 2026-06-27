@@ -1,9 +1,188 @@
 //! Serval binary entry point.
 //!
-//! The dual-server bootstrap (Control Plane + Data Plane) is assembled in a
-//! later milestone; for now this is a placeholder so the crate builds and the
-//! library tests run on machines without a database.
+//! Boots the two planes — the Control Plane (management API + embedded UI) and
+//! the Data Plane (public delivery) — over a shared PostgreSQL pool and a
+//! single in-memory delivery cache, or runs an offline admin-allowlist command.
 
-fn main() {
-    println!("serval: not yet wired up");
+use anyhow::{Context, Result};
+use clap::{Parser, Subcommand};
+use tokio::net::TcpListener;
+use tokio::signal;
+
+use serval::auth::AuthService;
+use serval::cache::DeliveryCache;
+use serval::config::Config;
+use serval::db::{self, Repository};
+use serval::state::{ControlState, DeliveryState};
+use serval::{api, delivery};
+
+/// High-performance snippet delivery and templating service.
+#[derive(Parser)]
+#[command(name = "serval", version, about, long_about = None)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Run both planes (the default when no subcommand is given).
+    Serve,
+    /// Manage the local admin allowlist.
+    Admin {
+        #[command(subcommand)]
+        action: AdminAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum AdminAction {
+    /// Grant a user the admin role.
+    Promote {
+        /// The user's stable identity (the token `sub`, or the dev superuser).
+        user_id: String,
+    },
+    /// Revoke a user's admin role.
+    Demote {
+        /// The user's stable identity.
+        user_id: String,
+    },
+    /// List every user currently holding the admin role.
+    List,
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    init_tracing();
+
+    let cli = Cli::parse();
+    let config = Config::from_env().context("failed to load configuration")?;
+    let pool = db::connect(&config.database_url, config.database_max_connections)
+        .await
+        .context("failed to connect to PostgreSQL")?;
+    let repo = Repository::new(pool);
+
+    match cli.command.unwrap_or(Command::Serve) {
+        Command::Serve => serve(config, repo).await,
+        Command::Admin { action } => run_admin(&repo, action).await,
+    }
+}
+
+/// Boot both planes and run until a shutdown signal arrives.
+async fn serve(config: Config, repo: Repository) -> Result<()> {
+    // One cache handle is shared by both planes: a Control Plane write evicts
+    // exactly what a Data Plane read would load.
+    let cache = DeliveryCache::new(config.cache_byte_budget, config.cache_mutable_ttl);
+    let auth = std::sync::Arc::new(
+        AuthService::new(config.auth)
+            .await
+            .context("failed to initialize the auth service")?,
+    );
+
+    let control_state = ControlState {
+        repo: repo.clone(),
+        cache: cache.clone(),
+        auth,
+    };
+    let delivery_state = DeliveryState { repo, cache };
+
+    let control_app = api::router(control_state);
+    let delivery_app = delivery::router(delivery_state);
+
+    let control_listener = TcpListener::bind(config.control_plane_addr)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to bind control plane on {}",
+                config.control_plane_addr
+            )
+        })?;
+    let delivery_listener = TcpListener::bind(config.data_plane_addr)
+        .await
+        .with_context(|| format!("failed to bind data plane on {}", config.data_plane_addr))?;
+
+    tracing::info!(
+        control_plane = %config.control_plane_addr,
+        data_plane = %config.data_plane_addr,
+        "serval is listening"
+    );
+
+    let control = axum::serve(control_listener, control_app)
+        .with_graceful_shutdown(shutdown_signal("control plane"));
+    let delivery = axum::serve(delivery_listener, delivery_app)
+        .with_graceful_shutdown(shutdown_signal("data plane"));
+
+    // Run both concurrently; abort the moment either server fails.
+    tokio::try_join!(
+        async { control.await.context("control plane server error") },
+        async { delivery.await.context("data plane server error") },
+    )?;
+
+    tracing::info!("serval shut down cleanly");
+    Ok(())
+}
+
+/// Execute an offline admin-allowlist command.
+async fn run_admin(repo: &Repository, action: AdminAction) -> Result<()> {
+    match action {
+        AdminAction::Promote { user_id } => {
+            repo.set_admin(&user_id, true)
+                .await
+                .context("failed to grant admin role")?;
+            println!("Granted admin role to {user_id}.");
+        }
+        AdminAction::Demote { user_id } => {
+            repo.set_admin(&user_id, false)
+                .await
+                .context("failed to revoke admin role")?;
+            println!("Revoked admin role from {user_id}.");
+        }
+        AdminAction::List => {
+            let admins = repo.list_admins().await.context("failed to list admins")?;
+            if admins.is_empty() {
+                println!("No users currently hold the admin role.");
+            } else {
+                println!("Admins ({}):", admins.len());
+                for admin in admins {
+                    println!("  {}", admin.id);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Initialize structured logging, honoring `RUST_LOG` with an `info` default.
+fn init_tracing() {
+    use tracing_subscriber::{EnvFilter, fmt};
+
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    fmt().with_env_filter(filter).init();
+}
+
+/// Resolve once either Ctrl-C or (on Unix) SIGTERM is received.
+async fn shutdown_signal(plane: &str) {
+    let ctrl_c = async {
+        signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl-C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+
+    tracing::info!(plane, "shutdown signal received; draining connections");
 }
