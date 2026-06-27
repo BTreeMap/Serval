@@ -47,7 +47,15 @@ pub struct SnippetResponse {
     pub content_type: String,
     pub owner_id: Option<String>,
 }
-
+/// A compact route listing entry for the dashboard index.
+#[derive(Debug, Serialize)]
+pub struct SnippetSummary {
+    pub id: String,
+    pub immutable: bool,
+    pub content_type: String,
+    pub owner_id: Option<String>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
 /// One history ledger entry, serialized for the UI.
 #[derive(Debug, Serialize)]
 pub struct HistoryItem {
@@ -80,6 +88,25 @@ pub async fn me(caller: Caller) -> Json<MeResponse> {
         user_id: caller.user_id,
         is_admin: caller.is_admin,
     })
+}
+
+/// `GET /api/snippets` — list the caller's routes, newest first.
+pub async fn list_snippets(
+    State(state): State<ControlState>,
+    caller: Caller,
+) -> Result<Json<Vec<SnippetSummary>>, ApiError> {
+    let routes = state.repo.list_routes_for_owner(&caller.user_id).await?;
+    let snippets = routes
+        .into_iter()
+        .map(|r| SnippetSummary {
+            id: r.id,
+            immutable: r.cache_mode == CacheMode::Immutable,
+            content_type: r.content_type,
+            owner_id: r.owner_id,
+            updated_at: r.updated_at,
+        })
+        .collect();
+    Ok(Json(snippets))
 }
 
 /// `POST /api/snippets` — create a mutable alias or immutable permalink.

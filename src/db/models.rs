@@ -161,6 +161,17 @@ pub struct HistoryEntry {
     pub changed_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// A compact route listing entry for the dashboard: enough to render a row and
+/// link through to detail, without loading content or history.
+#[derive(Debug, Clone)]
+pub struct RouteSummary {
+    pub id: String,
+    pub content_type: String,
+    pub cache_mode: CacheMode,
+    pub owner_id: Option<String>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// A locally tracked authenticated user.
 ///
 /// Under OAuth the identity provider is the source of truth for *who* a user

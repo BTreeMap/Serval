@@ -13,7 +13,7 @@
 use sqlx::PgPool;
 
 use super::models::{
-    CacheMode, ContentHash, DeliveryRecord, HistoryEntry, RouteId, RouteMeta, User,
+    CacheMode, ContentHash, DeliveryRecord, HistoryEntry, RouteId, RouteMeta, RouteSummary, User,
 };
 
 /// Parameters for creating a new route over a freshly stored content block.
@@ -269,6 +269,55 @@ impl Repository {
                 owner_id,
             }),
         )
+    }
+
+    /// List a user's routes, most recently changed first. The "last changed"
+    /// timestamp is read from the head of each route's history ledger, so the
+    /// listing reflects updates without the `routes` table carrying a mutable
+    /// timestamp column.
+    pub async fn list_routes_for_owner(
+        &self,
+        owner_id: &str,
+    ) -> Result<Vec<RouteSummary>, sqlx::Error> {
+        let rows = sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                i16,
+                Option<String>,
+                chrono::DateTime<chrono::Utc>,
+            ),
+        >(
+            r"
+            SELECT r.id,
+                   r.content_type,
+                   r.cache_mode,
+                   r.owner_id,
+                   COALESCE(MAX(h.changed_at), NOW()) AS updated_at
+            FROM routes r
+            LEFT JOIN pointer_history h ON h.route_id = r.id
+            WHERE r.owner_id = $1
+            GROUP BY r.id, r.content_type, r.cache_mode, r.owner_id
+            ORDER BY updated_at DESC
+            ",
+        )
+        .bind(owner_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(
+                |(id, content_type, mode, owner_id, updated_at)| RouteSummary {
+                    id,
+                    content_type,
+                    cache_mode: CacheMode::from_i16(mode).unwrap_or(CacheMode::Mutable),
+                    owner_id,
+                    updated_at,
+                },
+            )
+            .collect())
     }
 
     /// List the full version history of a route, newest first.
