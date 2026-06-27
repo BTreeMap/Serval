@@ -32,7 +32,7 @@ Serval runs two HTTP servers over a single PostgreSQL database:
 | Plane | Port | Role |
 |---|---|---|
 | **Control Plane** | `8080` | Management API (`/api/snippets`) + embedded React dashboard. Handles version-controlled writes. |
-| **Data Plane** | `3000` | Public, extreme-throughput delivery. `GET`-only, with template substitution and an in-memory `moka` read-through cache (1,000 entries). |
+| **Data Plane** | `3000` | Public, extreme-throughput delivery. `GET`-only, with template substitution and a byte-bounded in-memory `moka` read-through cache. |
 
 A `PATCH` on the Control Plane instantly evicts the affected entry from the Data
 Plane cache, so updates are reflected on the very next read.
@@ -59,17 +59,79 @@ See [docs/agents/database.md](docs/agents/database.md) for the full schema.
 # 1. Init submodules (agent skills live in .github/skills)
 git submodule update --init --recursive
 
-# 2. Build the frontend (build.rs embeds frontend/dist/)
-cd frontend && npm ci && npm run build && cd ..
-
-# 3. Run a local PostgreSQL (16+) and point Serval at it
+# 2. Run a local PostgreSQL (16+) and point Serval at it
 docker compose up -d postgres
 export DATABASE_URL=postgres://serval:serval@localhost:5432/serval
 
-# 4. Build and run
+# 3. Build and run (build.rs builds and embeds frontend/dist/ automatically)
 cargo run --release
 # Control Plane + UI: http://localhost:8080
 # Data Plane:         http://localhost:3000
+```
+
+The database schema is applied idempotently on startup, so the first run needs
+no separate migration step. To run the whole stack — app included — in
+containers instead:
+
+```bash
+docker compose --profile app up --build
+```
+
+## Using the API
+
+The Control Plane speaks JSON under `/api`. With the default `AUTH_MODE=none`
+every request is the local superuser, so no token is needed for local use.
+
+```bash
+# Create a mutable alias (random id) holding a template
+curl -s -X POST http://localhost:8080/api/snippets \
+  -H 'content-type: application/json' \
+  -d '{"content":"Hello {{name}} on {{port}}","immutable":false}'
+# => {"id":"<alias>","immutable":false, ...}
+
+# Fetch it from the Data Plane, substituting variables from the query string
+curl "http://localhost:3000/<alias>?name=world&port=8080"
+# => Hello world on 8080   ({{name}}/{{port}} filled; unknown vars stay literal)
+
+# Publish a new version (mutable aliases only); the next GET reflects it
+curl -s -X PATCH http://localhost:8080/api/snippets/<alias> \
+  -H 'content-type: application/json' -d '{"content":"Goodbye"}'
+
+# Create an immutable permalink: the id *is* the content hash
+curl -s -X POST http://localhost:8080/api/snippets \
+  -H 'content-type: application/json' \
+  -d '{"content":"pinned forever","immutable":true}'
+```
+
+When `AUTH_MODE=oauth`, send `Authorization: Bearer <jwt>`; identity comes from
+the token's `sub`, while the **admin** role is managed locally (see below).
+
+## Configuration
+
+Serval is configured entirely through the environment (a local `.env` is loaded
+if present). See [.env.example](.env.example) for the full list.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `DATABASE_URL` | _required_ | PostgreSQL connection string |
+| `DATABASE_MAX_CONNECTIONS` | `16` | Pool size |
+| `CONTROL_PLANE_ADDR` | `0.0.0.0:8080` | Management API + UI bind address |
+| `DATA_PLANE_ADDR` | `0.0.0.0:3000` | Delivery bind address |
+| `CACHE_BYTE_BUDGET` | `33554432` | Delivery cache size cap, in bytes |
+| `CACHE_MUTABLE_TTL_SECS` | `300` | TTL for mutable aliases in the cache |
+| `AUTH_MODE` | `none` | `none` (local superuser) or `oauth` |
+| `OAUTH_ISSUER` / `OAUTH_AUDIENCE` / `OAUTH_JWKS_URL` | — | Required when `AUTH_MODE=oauth` |
+
+## Admin roles (CLI)
+
+Authorization for writes is owner-or-admin, and the admin role lives in
+Serval's own `users` table rather than in any token claim. Manage it out of band
+with the CLI:
+
+```bash
+serval admin promote <user-id>   # grant the admin role
+serval admin demote  <user-id>   # revoke it
+serval admin list                # list current admins
 ```
 
 ## Development
