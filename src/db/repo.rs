@@ -12,7 +12,9 @@
 
 use sqlx::PgPool;
 
-use super::models::{CacheMode, ContentHash, DeliveryRecord, RouteId, User};
+use super::models::{
+    CacheMode, ContentHash, DeliveryRecord, HistoryEntry, RouteId, RouteMeta, User,
+};
 
 /// Parameters for creating a new route over a freshly stored content block.
 pub struct CreateRoute<'a> {
@@ -245,6 +247,50 @@ impl Repository {
                 is_admin,
                 created_at,
                 last_seen_at,
+            })
+            .collect())
+    }
+
+    /// Fetch routing-layer metadata for a route (no content). Returns `None`
+    /// when the route does not exist.
+    pub async fn fetch_route_meta(&self, id: &RouteId) -> Result<Option<RouteMeta>, sqlx::Error> {
+        let row = sqlx::query_as::<_, (String, String, i16, Option<String>)>(
+            "SELECT target_hash, content_type, cache_mode, owner_id FROM routes WHERE id = $1",
+        )
+        .bind(id.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(
+            row.map(|(target_hash, content_type, mode, owner_id)| RouteMeta {
+                target_hash,
+                content_type,
+                cache_mode: CacheMode::from_i16(mode).unwrap_or(CacheMode::Mutable),
+                owner_id,
+            }),
+        )
+    }
+
+    /// List the full version history of a route, newest first.
+    pub async fn list_history(&self, id: &RouteId) -> Result<Vec<HistoryEntry>, sqlx::Error> {
+        let rows = sqlx::query_as::<_, (String, String, chrono::DateTime<chrono::Utc>)>(
+            r"
+            SELECT target_hash, editor_id, changed_at
+            FROM pointer_history
+            WHERE route_id = $1
+            ORDER BY changed_at DESC, id DESC
+            ",
+        )
+        .bind(id.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|(target_hash, editor_id, changed_at)| HistoryEntry {
+                target_hash,
+                editor_id,
+                changed_at,
             })
             .collect())
     }

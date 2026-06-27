@@ -143,6 +143,24 @@ pub struct DeliveryRecord {
     pub cache_mode: CacheMode,
 }
 
+/// Routing-layer metadata for a single route, without its content. Used by the
+/// Control Plane to enforce ownership and mutability before a write.
+#[derive(Debug, Clone)]
+pub struct RouteMeta {
+    pub target_hash: String,
+    pub content_type: String,
+    pub cache_mode: CacheMode,
+    pub owner_id: Option<String>,
+}
+
+/// One entry in the append-only `pointer_history` ledger.
+#[derive(Debug, Clone)]
+pub struct HistoryEntry {
+    pub target_hash: String,
+    pub editor_id: String,
+    pub changed_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// A locally tracked authenticated user.
 ///
 /// Under OAuth the identity provider is the source of truth for *who* a user
