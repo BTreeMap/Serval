@@ -6,6 +6,7 @@
 //! delivery cache. This module tree exposes the building blocks; see the binary
 //! entry point for how the two planes are wired together.
 
+pub mod cache;
 pub mod crypto;
 pub mod db;
 pub mod renderer;
