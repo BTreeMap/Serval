@@ -1,0 +1,88 @@
+[package]
+name = "serval"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "MIT"
+description = "High-performance snippet delivery and templating service over a pure content-addressed storage engine."
+
+[lib]
+name = "serval"
+path = "src/lib.rs"
+
+[[bin]]
+name = "serval"
+path = "src/main.rs"
+
+[features]
+# Integration tests require a live PostgreSQL (provided by CI / testcontainers).
+# They are gated off by default so `cargo test` is green on machines without a DB.
+integration = []
+
+[dependencies]
+# Web framework
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+
+# Serialization
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+
+# Database (runtime-checked queries; no build-time DATABASE_URL dependency)
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio-rustls",
+    "postgres",
+    "macros",
+    "chrono",
+] }
+
+# In-memory delivery cache
+moka = { version = "0.12", features = ["future"] }
+
+# Configuration / environment
+dotenvy = "0.15"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Cryptography: CSPRNG aliases + SHA3-384 content hashing
+rand = "0.8"
+sha3 = "0.10"
+base64 = "0.22"
+
+# Authentication (OAuth/JWT with JWKS)
+jsonwebtoken = { version = "9", features = ["use_pem"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# Rendering engine
+regex = "1"
+
+# MIME resolution
+mime_guess = "2"
+
+# Embedded frontend (virtual file system)
+rust-embed = { version = "8", features = ["mime-guess"] }
+
+# Timestamps
+chrono = { version = "0.4", features = ["serde"] }
+
+[build-dependencies]
+# build.rs orchestrates the frontend build before embedding frontend/dist/.
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["postgres"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

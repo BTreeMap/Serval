@@ -1,0 +1,21 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock.orig
+
+# Frontend
+/frontend/node_modules
+/frontend/dist
+/frontend/.vite
+
+# Environment / secrets
+.env
+.env.local
+*.local
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/*
+!.vscode/extensions.json
