@@ -23,7 +23,14 @@ services:
       retries: 10
 
   serval:
-    build: .
+    # Pull a published multi-arch image by default. Override SERVAL_IMAGE_TAG to
+    # track a channel or pin a version:
+    #   stable  — vetted releases (default; recommended for real use)
+    #   latest  — cutting-edge main builds that passed the CI quality gate
+    #   v1.2.3  — a specific release
+    # To build from local source instead, run with the build profile:
+    #   docker compose --profile build up --build
+    image: ghcr.io/btreemap/serval:${SERVAL_IMAGE_TAG:-stable}
     profiles: ["app"]
     depends_on:
       postgres:
@@ -40,6 +47,19 @@ services:
     ports:
       - "8080:8080"
       - "3000:3000"
+
+  # Same service, but built from the local checkout instead of pulled from GHCR.
+  # Selected via the `build` profile so the default `app` profile stays pull-only.
+  serval-local:
+    extends:
+      service: serval
+    build: .
+    image: serval:local
+    profiles: ["build"]
+    # `extends` does not copy depends_on, so restate the database dependency.
+    depends_on:
+      postgres:
+        condition: service_healthy
 
 volumes:
   serval-pgdata:

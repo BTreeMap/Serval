@@ -84,7 +84,35 @@ no separate migration step. To run the whole stack — app included — in
 containers instead:
 
 ```bash
-docker compose --profile app up --build
+# Pull a published image and run the full stack (uses :stable by default)
+docker compose --profile app up
+
+# Or build the app from your local checkout instead of pulling
+docker compose --profile build up --build
+```
+
+## Container images
+
+Multi-arch images (`linux/amd64` + native `linux/arm64`) are published to the
+GitHub Container Registry at `ghcr.io/btreemap/serval`. Two rolling channels
+make the stability contract explicit:
+
+| Tag | Channel | When it moves |
+|---|---|---|
+| `:stable` | Vetted releases | Published from each `v*` version tag. Recommended for real deployments. |
+| `:latest` | Cutting edge | Republished on every `main` build **after the PR Quality Gate passes**, so community testers can exercise unreleased changes without running un-vetted code. |
+| `:vX.Y.Z`, `:vX.Y` | Pinned release | Immutable semantic-version tags for reproducible deploys. |
+
+```bash
+docker pull ghcr.io/btreemap/serval:stable   # production
+docker pull ghcr.io/btreemap/serval:latest   # help us test main
+```
+
+Point `docker compose` at a channel with `SERVAL_IMAGE_TAG` (defaults to
+`stable`):
+
+```bash
+SERVAL_IMAGE_TAG=latest docker compose --profile app up
 ```
 
 ## Using the API
@@ -152,6 +180,25 @@ serval admin list                # list current admins
 - Delivery, caching & rendering internals: [docs/agents/delivery.md](docs/agents/delivery.md)
 - Frontend setup: [docs/agents/frontend.md](docs/agents/frontend.md)
 - Engineering standards: [docs/agents/engineering-standards.md](docs/agents/engineering-standards.md)
+
+### CI/CD security & caching
+
+The GitHub Actions pipeline is built for least privilege and supply-chain
+containment:
+
+- **Deny-all token default.** Every workflow sets `permissions: {}` at the top
+  and grants each job only the narrowest scope it needs.
+- **Build code never holds a write token.** Jobs that execute third-party code
+  (`npm install`, `cargo build` scripts/proc-macros) run read-only. Publishing
+  is split into separate jobs — releases are attached and images are pushed by
+  steps that run **no** build code — so a poisoned dependency has no
+  release/registry token to exfiltrate.
+- **`:latest` is gated.** Images are pushed to `:latest` only after the PR
+  Quality Gate passes on `main`; the publish workflow never runs on pull
+  requests, so untrusted PR code never sees a registry-write token.
+- **Poison-proof compiler cache.** Rust caching is shared for speed, but only
+  builds on `main` may *write* the cache while pull requests restore it
+  read-only — a PR cannot persist a poisoned artifact for a later trusted build.
 
 ## License
 

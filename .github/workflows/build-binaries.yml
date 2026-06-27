@@ -5,6 +5,10 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+# Deny-all by default. The release-write token is granted only to the dedicated
+# `release` job below, which runs no third-party build code.
+permissions: {}
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -12,20 +16,38 @@ jobs:
   build:
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    # Read-only: this job runs untrusted third-party code (npm install scripts,
+    # cargo build scripts/proc-macros). Keeping it without write scopes means a
+    # poisoned dependency has no release/packages token to steal. The compiled
+    # artifacts are handed to the privileged `release` job out-of-band.
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-          - os: ubuntu-latest
+            asset_name: serval-linux-amd64
+            bin: serval
+          # arm64 is a first-class citizen: built natively on an arm64 runner
+          # instead of cross-compiling, matching the Docker build strategy.
+          - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+            asset_name: serval-linux-arm64
+            bin: serval
           - os: macos-latest
             target: aarch64-apple-darwin
-          - os: macos-latest
+            asset_name: serval-macos-arm64
+            bin: serval
+          - os: macos-13
             target: x86_64-apple-darwin
+            asset_name: serval-macos-amd64
+            bin: serval
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            asset_name: serval-windows-amd64.exe
+            bin: serval.exe
 
     steps:
       - uses: actions/checkout@v4
@@ -47,23 +69,43 @@ jobs:
       - name: Install Rust target
         run: rustup target add ${{ matrix.target }}
 
-      - name: Install cross linker (aarch64 linux)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
-
       - name: Build release binary
         run: cargo build --release --locked --target ${{ matrix.target }}
         env:
           SERVAL_SKIP_FRONTEND_BUILD: "1"
 
+      - name: Stage binary
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "dist/${{ matrix.asset_name }}"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: serval-${{ matrix.target }}
-          path: |
-            target/${{ matrix.target }}/release/serval
-            target/${{ matrix.target }}/release/serval.exe
-          if-no-files-found: ignore
+          name: ${{ matrix.asset_name }}
+          path: dist/${{ matrix.asset_name }}
+          if-no-files-found: error
+
+  # Privileged publish step, isolated from all build code. It only downloads the
+  # already-built artifacts and attaches them to the release, so the
+  # `contents: write` token is never exposed to npm/cargo dependency code.
+  release:
+    name: Attach binaries to release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download built binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          fail_on_unmatched_files: true

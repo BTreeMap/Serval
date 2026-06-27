@@ -9,6 +9,11 @@ concurrency:
   group: integration-${{ github.ref }}
   cancel-in-progress: true
 
+# Deny-all by default; the acceptance suite only needs to read the source and
+# talk to its own ephemeral, in-runner PostgreSQL. No privileged token is ever
+# minted, so untrusted PR code cannot leak one.
+permissions: {}
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -16,6 +21,8 @@ jobs:
   acceptance:
     name: Acceptance suite (ephemeral PostgreSQL 16)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
       - uses: actions/checkout@v4
@@ -25,15 +32,15 @@ jobs:
       - name: Install Rust toolchain
         run: rustup show
 
-      - name: Cache cargo
-        uses: actions/cache@v4
+      # Same sharp cache boundary as the quality gate: PRs restore main's warm
+      # cache read-only while only main may write it, so PRs cannot poison the
+      # cache that trusted builds later consume. A distinct key keeps the
+      # integration target dir from clobbering the quality-gate cache.
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-integration-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-integration-
+          key: integration
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # The acceptance suite boots its own ephemeral PostgreSQL via
       # testcontainers, so only a working Docker daemon is required — which the

@@ -9,6 +9,11 @@ concurrency:
   group: quality-gate-${{ github.ref }}
   cancel-in-progress: true
 
+# Deny-all by default; this workflow only ever reads the checked-out code. No
+# job here writes packages, contents, or any other scope, so a malicious PR or a
+# compromised build dependency has no privileged token to exfiltrate.
+permissions: {}
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -16,6 +21,8 @@ jobs:
   backend:
     name: Backend (fmt, clippy, tests)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
         with:
@@ -24,15 +31,15 @@ jobs:
       - name: Install Rust toolchain
         run: rustup show
 
-      - name: Cache cargo
-        uses: actions/cache@v4
+      # Compiler cache with a sharp trust boundary: only builds on the default
+      # branch may *write* the cache (`save-if`), while pull requests restore it
+      # read-only. A PR therefore reuses main's warm cache for speed but can
+      # never persist a poisoned artifact that a later trusted build would read.
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          key: quality-gate
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Format
         run: cargo fmt --all -- --check
@@ -50,6 +57,8 @@ jobs:
   frontend:
     name: Frontend (build, lint)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     defaults:
       run:
         working-directory: frontend
