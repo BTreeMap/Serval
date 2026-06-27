@@ -22,7 +22,7 @@ function Gate() {
 
   if (loading) {
     return (
-      <div className="flex min-h-full items-center justify-center bg-slate-950 text-slate-400">
+      <div className="flex min-h-full items-center justify-center bg-canvas text-ink-soft">
         Loading…
       </div>
     );

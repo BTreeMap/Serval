@@ -9,11 +9,11 @@ export function Button({
     variant?: "primary" | "secondary" | "ghost";
 }) {
     const base =
-        "inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/60";
+        "inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-wisteria/50";
     const variants: Record<string, string> = {
-        primary: "bg-sky-500 text-white hover:bg-sky-400",
-        secondary: "bg-slate-700 text-slate-100 hover:bg-slate-600",
-        ghost: "bg-transparent text-slate-300 hover:bg-slate-800",
+        primary: "bg-wisteria-deep text-white hover:bg-wisteria",
+        secondary: "border border-line bg-surface text-ink hover:bg-canvas",
+        ghost: "bg-transparent text-ink-soft hover:bg-canvas hover:text-ink",
     };
     return (
         <button className={`${base} ${variants[variant]} ${className}`} {...props} />
@@ -27,7 +27,7 @@ export function Card({
 }: React.HTMLAttributes<HTMLDivElement>) {
     return (
         <div
-            className={`rounded-xl border border-slate-800 bg-slate-900/60 p-6 shadow-sm ${className}`}
+            className={`rounded-2xl border border-line bg-surface p-6 shadow-sm shadow-ink/5 ${className}`}
             {...props}
         />
     );
@@ -38,13 +38,13 @@ export function Badge({
     tone = "neutral",
     children,
 }: {
-    tone?: "neutral" | "amber" | "sky";
+    tone?: "neutral" | "cream" | "wisteria";
     children: React.ReactNode;
 }) {
     const tones: Record<string, string> = {
-        neutral: "bg-slate-800 text-slate-300",
-        amber: "bg-amber-500/15 text-amber-300 ring-1 ring-amber-500/30",
-        sky: "bg-sky-500/15 text-sky-300 ring-1 ring-sky-500/30",
+        neutral: "bg-canvas text-ink-soft ring-1 ring-line",
+        cream: "bg-cream/60 text-ink ring-1 ring-cream",
+        wisteria: "bg-wisteria/15 text-wisteria-deep ring-1 ring-wisteria/30",
     };
     return (
         <span
@@ -85,7 +85,7 @@ export function CopyButton({
 /** An inline error banner. */
 export function ErrorBanner({ message }: { message: string }) {
     return (
-        <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+        <div className="rounded-lg border border-clay/30 bg-clay/10 px-4 py-3 text-sm text-clay">
             {message}
         </div>
     );

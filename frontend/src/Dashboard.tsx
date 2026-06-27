@@ -42,9 +42,9 @@ export function Dashboard() {
         <h2 className="text-lg font-semibold">Your snippets</h2>
         {error && <ErrorBanner message={error} />}
         {loading ? (
-          <p className="text-sm text-slate-400">Loading…</p>
+          <p className="text-sm text-ink-soft">Loading…</p>
         ) : snippets.length === 0 ? (
-          <p className="text-sm text-slate-400">
+          <p className="text-sm text-ink-soft">
             No snippets yet. Create one above to get started.
           </p>
         ) : (
@@ -67,12 +67,12 @@ function SnippetRow({ snippet }: { snippet: SnippetSummary }) {
         <div className="min-w-0">
           <Link
             to={`/s/${snippet.id}`}
-            className="block truncate font-mono text-sm text-sky-300 hover:underline"
+            className="block truncate font-mono text-sm text-wisteria-deep hover:underline"
           >
             {snippet.id}
           </Link>
-          <div className="mt-1 flex items-center gap-2 text-xs text-slate-400">
-            <Badge tone={snippet.immutable ? "amber" : "sky"}>
+          <div className="mt-1 flex items-center gap-2 text-xs text-ink-soft">
+            <Badge tone={snippet.immutable ? "cream" : "wisteria"}>
               {snippet.immutable ? "immutable" : "mutable"}
             </Badge>
             <span>{snippet.content_type}</span>
@@ -127,8 +127,8 @@ function CreateForm({ onCreated }: { onCreated: () => void }) {
   return (
     <Card>
       <h2 className="text-lg font-semibold">Create a snippet</h2>
-      <p className="mt-1 text-sm text-slate-400">
-        Templates support <code className="text-sky-300">{"{{variable}}"}</code>{" "}
+      <p className="mt-1 text-sm text-ink-soft">
+        Templates support <code className="text-wisteria-deep">{"{{variable}}"}</code>{" "}
         placeholders, substituted from the delivery URL query string.
       </p>
       <form onSubmit={(e) => void submit(e)} className="mt-4 space-y-4">
@@ -137,21 +137,21 @@ function CreateForm({ onCreated }: { onCreated: () => void }) {
           onChange={(e) => setContent(e.target.value)}
           placeholder="Hello {{name}} on port {{port}}"
           rows={6}
-          className="w-full resize-y rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-sm text-slate-100 focus:border-sky-500 focus:outline-none"
+          className="w-full resize-y rounded-lg border border-line bg-canvas px-3 py-2 font-mono text-sm text-ink focus:border-wisteria focus:outline-none"
         />
         <div className="flex flex-wrap items-center gap-4">
           <input
             value={contentType}
             onChange={(e) => setContentType(e.target.value)}
             placeholder="content type (optional)"
-            className="flex-1 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 focus:border-sky-500 focus:outline-none"
+            className="flex-1 rounded-lg border border-line bg-canvas px-3 py-2 text-sm text-ink focus:border-wisteria focus:outline-none"
           />
-          <label className="flex items-center gap-2 text-sm text-slate-300">
+          <label className="flex items-center gap-2 text-sm text-ink-soft">
             <input
               type="checkbox"
               checked={immutable}
               onChange={(e) => setImmutable(e.target.checked)}
-              className="h-4 w-4 rounded border-slate-600 bg-slate-950"
+              className="h-4 w-4 rounded border-line bg-canvas accent-wisteria-deep"
             />
             Immutable permalink
           </label>
@@ -163,10 +163,10 @@ function CreateForm({ onCreated }: { onCreated: () => void }) {
       </form>
 
       {created && (
-        <div className="mt-4 rounded-lg border border-sky-500/30 bg-sky-500/10 p-4">
-          <p className="text-sm text-slate-200">Created successfully.</p>
+        <div className="mt-4 rounded-lg border border-celadon bg-celadon/20 p-4">
+          <p className="text-sm text-ink">Created successfully.</p>
           <div className="mt-2 flex items-center gap-2">
-            <code className="flex-1 truncate font-mono text-xs text-sky-300">
+            <code className="flex-1 truncate font-mono text-xs text-wisteria-deep">
               {deliveryUrl(created.id)}
             </code>
             <CopyButton value={deliveryUrl(created.id)} label="Copy link" />

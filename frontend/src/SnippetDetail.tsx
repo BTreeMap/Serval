@@ -36,7 +36,7 @@ export function SnippetDetail() {
   }, [refresh]);
 
   if (loading) {
-    return <p className="text-sm text-slate-400">Loading…</p>;
+    return <p className="text-sm text-ink-soft">Loading…</p>;
   }
   if (error) {
     return (
@@ -56,20 +56,20 @@ export function SnippetDetail() {
 
       <Card className="space-y-3">
         <div className="flex items-center justify-between gap-4">
-          <code className="truncate font-mono text-sm text-sky-300">
+          <code className="truncate font-mono text-sm text-wisteria-deep">
             {detail.id}
           </code>
-          <Badge tone={detail.immutable ? "amber" : "sky"}>
+          <Badge tone={detail.immutable ? "cream" : "wisteria"}>
             {detail.immutable ? "immutable" : "mutable"}
           </Badge>
         </div>
-        <div className="flex items-center gap-2 text-xs text-slate-400">
+        <div className="flex items-center gap-2 text-xs text-ink-soft">
           <span>{detail.content_type}</span>
           <span>·</span>
           <span>{detail.history_count} version(s)</span>
         </div>
         <div className="flex items-center gap-2">
-          <code className="flex-1 truncate rounded bg-slate-950 px-3 py-2 font-mono text-xs text-slate-300">
+          <code className="flex-1 truncate rounded bg-canvas px-3 py-2 font-mono text-xs text-ink-soft">
             {deliveryUrl(detail.id)}
           </code>
           <CopyButton value={deliveryUrl(detail.id)} label="Copy link" />
@@ -77,7 +77,7 @@ export function SnippetDetail() {
       </Card>
 
       {detail.immutable ? (
-        <p className="text-sm text-slate-400">
+        <p className="text-sm text-ink-soft">
           Immutable permalinks are content-addressed and cannot be edited.
           Create a new snippet to publish different content.
         </p>
@@ -123,7 +123,7 @@ function Editor({ id, onUpdated }: { id: string; onUpdated: () => void }) {
           onChange={(e) => setContent(e.target.value)}
           placeholder="New template content…"
           rows={6}
-          className="w-full resize-y rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-sm text-slate-100 focus:border-sky-500 focus:outline-none"
+          className="w-full resize-y rounded-lg border border-line bg-canvas px-3 py-2 font-mono text-sm text-ink focus:border-wisteria focus:outline-none"
         />
         {error && <ErrorBanner message={error} />}
         <Button type="submit" disabled={busy}>
@@ -143,13 +143,13 @@ function HistoryList({ history }: { history: HistoryItem[] }) {
         {history.map((entry, index) => (
           <li
             key={`${entry.changed_at}-${entry.target_hash}`}
-            className="flex items-center justify-between gap-4 rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-3"
+            className="flex items-center justify-between gap-4 rounded-lg border border-line bg-surface px-4 py-3"
           >
             <div className="min-w-0">
-              <code className="block truncate font-mono text-xs text-slate-300">
+              <code className="block truncate font-mono text-xs text-ink-soft">
                 {entry.target_hash}
               </code>
-              <span className="text-xs text-slate-500">
+              <span className="text-xs text-ink-faint">
                 by {entry.editor_id} · {formatDate(entry.changed_at)}
               </span>
             </div>
@@ -163,7 +163,7 @@ function HistoryList({ history }: { history: HistoryItem[] }) {
 
 function BackLink() {
   return (
-    <Link to="/" className="text-sm text-sky-300 hover:underline">
+    <Link to="/" className="text-sm text-wisteria-deep hover:underline">
       ← Back to dashboard
     </Link>
   );

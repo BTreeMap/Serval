@@ -1,7 +1,33 @@
 @import "tailwindcss";
 
+/* Zen, minimalist light theme built on a soft pastel palette with Wisteria
+   Blue as the primary interactive color. Tokens below are exposed as Tailwind
+   utilities (e.g. `bg-wisteria`, `text-ink`, `border-line`) and support the
+   standard opacity modifiers (e.g. `bg-wisteria/10`). */
+@theme {
+    /* Source palette */
+    --color-cream: #fffd98;
+    --color-celadon: #bde4a7;
+    --color-sage: #b3d2b2;
+    --color-powder: #9fbbcc;
+    --color-wisteria: #7a9cc6;
+    /* Deepened blue for primary surfaces that carry white text (AA contrast). */
+    --color-wisteria-deep: #4f6f9c;
+
+    /* Neutrals — calm, low-contrast ink on an airy off-white canvas. */
+    --color-canvas: #f7f9f6;
+    --color-surface: #ffffff;
+    --color-line: #e4e9e3;
+    --color-ink: #334049;
+    --color-ink-soft: #5c6b75;
+    --color-ink-faint: #8a98a1;
+
+    /* Muted clay-rose for error/danger states, harmonized with the palette. */
+    --color-clay: #b87d7d;
+}
+
 :root {
-    color-scheme: dark;
+    color-scheme: light;
 }
 
 html,
@@ -12,7 +38,11 @@ body,
 
 body {
     margin: 0;
+    background-color: var(--color-canvas);
+    color: var(--color-ink);
     font-family:
         "Inter", system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial,
         sans-serif;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
 }

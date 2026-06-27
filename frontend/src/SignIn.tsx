@@ -27,10 +27,10 @@ export function SignIn() {
     };
 
     return (
-        <div className="flex min-h-full items-center justify-center bg-slate-950 px-6">
+        <div className="flex min-h-full items-center justify-center bg-canvas px-6">
             <Card className="w-full max-w-md">
                 <h1 className="text-xl font-semibold">Sign in to Serval</h1>
-                <p className="mt-1 text-sm text-slate-400">
+                <p className="mt-1 text-sm text-ink-soft">
                     Paste a bearer token issued by your identity provider.
                 </p>
                 <form onSubmit={(e) => void submit(e)} className="mt-6 space-y-4">
@@ -39,7 +39,7 @@ export function SignIn() {
                         onChange={(e) => setToken(e.target.value)}
                         placeholder="eyJhbGciOi…"
                         rows={4}
-                        className="w-full resize-none rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-xs text-slate-100 focus:border-sky-500 focus:outline-none"
+                        className="w-full resize-none rounded-lg border border-line bg-canvas px-3 py-2 font-mono text-xs text-ink focus:border-wisteria focus:outline-none"
                     />
                     {error && <ErrorBanner message={error} />}
                     <Button type="submit" disabled={busy} className="w-full">
