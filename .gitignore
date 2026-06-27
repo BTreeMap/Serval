@@ -7,6 +7,7 @@ Cargo.lock.orig
 /frontend/node_modules
 /frontend/dist
 /frontend/.vite
+/frontend/*.tsbuildinfo
 
 # Environment / secrets
 .env
