@@ -68,7 +68,6 @@ async fn main() -> Result<()> {
         Command::Admin { action } => run_admin(&repo, action).await,
     }
 }
-
 /// Boot both planes and run until a shutdown signal arrives.
 async fn serve(config: Config, repo: Repository) -> Result<()> {
     // One cache handle is shared by both planes: a Control Plane write evicts
@@ -83,6 +82,16 @@ async fn serve(config: Config, repo: Repository) -> Result<()> {
             .context("failed to initialize the auth service")?,
     );
 
+    // The public Data Plane reads through its own pool pinned to read-only
+    // transactions, so even a total compromise of the public plane cannot
+    // mutate storage — the write-capable pool stays exclusive to the Control
+    // Plane.
+    let delivery_pool =
+        db::connect_read_only(&config.database_url, config.database_max_connections)
+            .await
+            .context("failed to connect the read-only data plane pool")?;
+    let delivery_repo = Repository::new(delivery_pool);
+
     let control_state = ControlState {
         repo: repo.clone(),
         cache: cache.clone(),
@@ -90,7 +99,7 @@ async fn serve(config: Config, repo: Repository) -> Result<()> {
         signer: signer.clone(),
     };
     let delivery_state = DeliveryState {
-        repo,
+        repo: delivery_repo,
         cache,
         signer,
     };

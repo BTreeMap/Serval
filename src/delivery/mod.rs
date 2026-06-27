@@ -13,6 +13,7 @@ use axum::extract::{Path, RawQuery, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::cache::CachedSnippet;
 use crate::db::models::{CacheMode, RouteId};
@@ -22,10 +23,30 @@ use crate::state::DeliveryState;
 /// Build the Data Plane router. Two shapes resolve the same route: a bare id,
 /// and an id followed by a cosmetic filename whose extension drives the MIME
 /// type. The id itself is never affected by the filename — permalink purity.
+///
+/// Every response carries a hardened, content-agnostic set of security headers.
+/// Delivered snippets are untrusted, attacker-influenceable bytes (the query
+/// string is reflected into templates), so the public plane refuses to let a
+/// browser treat them as an active document: MIME sniffing is disabled, a
+/// `default-src 'none'; sandbox` CSP neutralizes any script/embedding, and
+/// `no-referrer` keeps the secret-bearing capability URL out of the `Referer`
+/// header.
 pub fn router(state: DeliveryState) -> Router {
     Router::new()
         .route("/{id}", get(deliver_bare))
         .route("/{id}/{filename}", get(deliver_named))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::REFERRER_POLICY,
+            HeaderValue::from_static("no-referrer"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static("default-src 'none'; sandbox"),
+        ))
         .with_state(state)
 }
 
@@ -133,15 +154,40 @@ fn parse_query(query: Option<&str>) -> HashMap<String, String> {
 /// Resolve the response MIME type: prefer the filename extension, falling back
 /// to the stored `content_type`. Falls back further to the stored value if the
 /// guess is not a legal header.
+///
+/// The public plane never serves active HTML: because the query string is
+/// reflected into the body unescaped and the client controls the filename
+/// extension, honoring `text/html` would turn any snippet with a placeholder
+/// into a reflected-XSS vector. Any `text/html` result — however it was derived
+/// — is therefore downgraded to inert `text/plain; charset=utf-8`.
 fn resolve_content_type(filename: Option<&str>, stored: &str) -> HeaderValue {
     if let Some(name) = filename
         && let Some(guess) = mime_guess::from_path(name).first()
         && let Ok(value) = HeaderValue::from_str(guess.as_ref())
     {
-        return value;
+        return neutralize_html(value);
     }
-    HeaderValue::from_str(stored)
-        .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"))
+    let value = HeaderValue::from_str(stored)
+        .unwrap_or_else(|_| HeaderValue::from_static("text/plain; charset=utf-8"));
+    neutralize_html(value)
+}
+
+/// Downgrade any `text/html` content type to inert `text/plain; charset=utf-8`,
+/// leaving every other type untouched. The check ignores parameters and case so
+/// `Text/HTML; charset=...` is caught as well.
+fn neutralize_html(value: HeaderValue) -> HeaderValue {
+    let is_html = value
+        .to_str()
+        .ok()
+        .and_then(|s| s.split(';').next())
+        .map(str::trim)
+        .is_some_and(|essence| essence.eq_ignore_ascii_case("text/html"));
+
+    if is_html {
+        HeaderValue::from_static("text/plain; charset=utf-8")
+    } else {
+        value
+    }
 }
 
 /// Choose a `Cache-Control` policy from the route's mutability. Immutable,
@@ -185,6 +231,40 @@ mod tests {
         // Unknown extension also falls back to the stored type.
         let ct = resolve_content_type(Some("file.unknownext"), "text/markdown");
         assert_eq!(ct.to_str().unwrap(), "text/markdown");
+    }
+
+    #[test]
+    fn html_from_filename_extension_is_downgraded() {
+        // A client-chosen .html extension must never yield an active document.
+        let ct = resolve_content_type(Some("page.html"), "text/plain; charset=utf-8");
+        assert_eq!(ct.to_str().unwrap(), "text/plain; charset=utf-8");
+    }
+
+    #[test]
+    fn html_from_stored_type_is_downgraded() {
+        // Even a snippet stored as HTML is served inert, parameters and all.
+        let ct = resolve_content_type(None, "text/html; charset=utf-8");
+        assert_eq!(ct.to_str().unwrap(), "text/plain; charset=utf-8");
+
+        let ct = resolve_content_type(None, "text/html");
+        assert_eq!(ct.to_str().unwrap(), "text/plain; charset=utf-8");
+    }
+
+    #[test]
+    fn non_html_types_are_preserved() {
+        let ct = resolve_content_type(Some("data.json"), "text/plain");
+        assert_eq!(ct.to_str().unwrap(), "application/json");
+        let ct = resolve_content_type(None, "image/svg+xml");
+        assert_eq!(ct.to_str().unwrap(), "image/svg+xml");
+    }
+
+    #[test]
+    fn unparseable_stored_type_falls_back_to_text() {
+        // A stored value that is not a legal header (e.g. a stray newline)
+        // degrades to inert text, not a binary download — this is a text
+        // snippet service.
+        let ct = resolve_content_type(None, "not\na\nheader");
+        assert_eq!(ct.to_str().unwrap(), "text/plain; charset=utf-8");
     }
 
     #[test]
