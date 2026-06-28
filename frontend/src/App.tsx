@@ -5,6 +5,7 @@ import { Dashboard } from "./Dashboard";
 import { Layout } from "./Layout";
 import { SignIn } from "./SignIn";
 import { SnippetDetail } from "./SnippetDetail";
+import { Loading } from "./ui";
 
 /** The application root: wires the auth provider around the routed shell. */
 export function App() {
@@ -22,8 +23,8 @@ function Gate() {
 
   if (loading) {
     return (
-      <div className="flex min-h-full items-center justify-center bg-canvas text-ink-soft">
-        Loading…
+      <div className="flex min-h-full items-center justify-center bg-canvas">
+        <Loading />
       </div>
     );
   }

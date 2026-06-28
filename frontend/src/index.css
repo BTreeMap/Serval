@@ -1,33 +1,85 @@
 @import "tailwindcss";
 
-/* Zen, minimalist light theme built on a soft pastel palette with Wisteria
-   Blue as the primary interactive color. Tokens below are exposed as Tailwind
-   utilities (e.g. `bg-wisteria`, `text-ink`, `border-line`) and support the
-   standard opacity modifiers (e.g. `bg-wisteria/10`). */
+/* Zen, minimalist theme built on a soft pastel palette with Wisteria Blue as
+   the primary interactive color. Tokens below are exposed as Tailwind utilities
+   (e.g. `bg-wisteria`, `text-ink`, `border-line`) and support the standard
+   opacity modifiers (e.g. `bg-wisteria/10`).
+
+   The neutral and semantic tokens are resolved from theme variables so the
+   palette can flip wholesale for dark mode — driven purely by the operating
+   system via `prefers-color-scheme`, with no in-app toggle. The fixed brand
+   pastels stay constant across themes; only the canvas, surfaces, lines, ink
+   and feedback tints adapt. */
 @theme {
-    /* Source palette */
+    /* Source palette — brand pastels, constant across light and dark. */
     --color-cream: #fffd98;
     --color-celadon: #bde4a7;
     --color-sage: #b3d2b2;
     --color-powder: #9fbbcc;
     --color-wisteria: #7a9cc6;
     /* Deepened blue for primary surfaces that carry white text (AA contrast). */
-    --color-wisteria-deep: #4f6f9c;
+    --color-wisteria-deep: var(--theme-wisteria-deep);
 
-    /* Neutrals — calm, low-contrast ink on an airy off-white canvas. */
-    --color-canvas: #f7f9f6;
-    --color-surface: #ffffff;
-    --color-line: #e4e9e3;
-    --color-ink: #334049;
-    --color-ink-soft: #5c6b75;
-    --color-ink-faint: #8a98a1;
+    /* Neutrals + semantics — resolved from the theme variables below so they
+       can be re-pointed for dark mode without touching component classes. */
+    --color-canvas: var(--theme-canvas);
+    --color-surface: var(--theme-surface);
+    --color-surface-raised: var(--theme-surface-raised);
+    --color-line: var(--theme-line);
+    --color-ink: var(--theme-ink);
+    --color-ink-soft: var(--theme-ink-soft);
+    --color-ink-faint: var(--theme-ink-faint);
 
-    /* Muted clay-rose for error/danger states, harmonized with the palette. */
-    --color-clay: #b87d7d;
+    /* Muted clay-rose for error/danger; celadon-derived green for success —
+       both tuned to stay legible on either canvas. */
+    --color-clay: var(--theme-clay);
+    --color-success: var(--theme-success);
+
+    /* Elevation — soft, diffuse shadows tuned per theme. */
+    --shadow-card: var(--theme-shadow-card);
+    --shadow-pop: var(--theme-shadow-pop);
 }
 
+/* Light theme (default). */
 :root {
     color-scheme: light;
+
+    --theme-wisteria-deep: #4f6f9c;
+    --theme-canvas: #f7f9f6;
+    --theme-surface: #ffffff;
+    --theme-surface-raised: #ffffff;
+    --theme-line: #e4e9e3;
+    --theme-ink: #334049;
+    --theme-ink-soft: #5c6b75;
+    --theme-ink-faint: #8a98a1;
+    --theme-clay: #b87d7d;
+    --theme-success: #4f8a52;
+
+    --theme-shadow-card: 0 1px 2px rgb(51 64 73 / 0.05);
+    --theme-shadow-pop: 0 8px 24px -8px rgb(51 64 73 / 0.18);
+}
+
+/* Dark theme — applied automatically when the OS prefers dark. Canvas and
+   surfaces deepen to a calm slate; ink lightens; the wisteria accent brightens
+   so it stays legible on dark surfaces. Brand pastels are untouched. */
+@media (prefers-color-scheme: dark) {
+    :root {
+        color-scheme: dark;
+
+        --theme-wisteria-deep: #8fb0d6;
+        --theme-canvas: #11161b;
+        --theme-surface: #171e25;
+        --theme-surface-raised: #1d262e;
+        --theme-line: #2a343d;
+        --theme-ink: #e2e8ec;
+        --theme-ink-soft: #a3afb8;
+        --theme-ink-faint: #75828c;
+        --theme-clay: #d29a9a;
+        --theme-success: #8fcf92;
+
+        --theme-shadow-card: 0 1px 2px rgb(0 0 0 / 0.4);
+        --theme-shadow-pop: 0 8px 24px -8px rgb(0 0 0 / 0.6);
+    }
 }
 
 html,
@@ -45,4 +97,17 @@ body {
         sans-serif;
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
+}
+
+/* Respect users who prefer reduced motion: neutralize transitions/animations
+   without removing focus or state styling. */
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
+    }
 }

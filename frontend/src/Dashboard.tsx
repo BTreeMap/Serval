@@ -9,11 +9,15 @@ import {
   type SnippetSummary,
 } from "./api";
 import {
+  Banner,
   Button,
   Card,
   Combobox,
   CopyButton,
-  ErrorBanner,
+  EmptyState,
+  Icons,
+  Skeleton,
+  Textarea,
 } from "./ui";
 
 /** Canonical MIME types offered as create-form suggestions. Serval stores text,
@@ -71,13 +75,27 @@ export function Dashboard() {
 
       <section className="space-y-4">
         <h2 className="text-lg font-semibold">Your snippets</h2>
-        {error && <ErrorBanner message={error} />}
+        {error && <Banner tone="error">{error}</Banner>}
         {loading ? (
-          <p className="text-sm text-ink-soft">Loading…</p>
+          <ul className="space-y-3">
+            {[0, 1, 2].map((i) => (
+              <li key={i}>
+                <Card className="flex items-center justify-between gap-4 p-4">
+                  <div className="min-w-0 flex-1 space-y-2">
+                    <Skeleton className="h-4 w-2/3" />
+                    <Skeleton className="h-3 w-1/3" />
+                  </div>
+                  <Skeleton className="h-8 w-24" />
+                </Card>
+              </li>
+            ))}
+          </ul>
         ) : snippets.length === 0 ? (
-          <p className="text-sm text-ink-soft">
-            No snippets yet. Create one above to get started.
-          </p>
+          <EmptyState
+            icon={Icons.FileText}
+            title="No snippets yet"
+            description="Create your first snippet above to get a shareable delivery link."
+          />
         ) : (
           <ul className="space-y-3">
             {snippets.map((s) => (
@@ -94,24 +112,26 @@ export function Dashboard() {
 function SnippetRow({ snippet }: { snippet: SnippetSummary }) {
   return (
     <li>
-      <Card className="flex items-center justify-between gap-4 p-4">
+      <Card className="flex flex-col gap-3 p-4 transition-colors hover:border-wisteria/40 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
         <div className="min-w-0">
           <Link
             to={`/s/${snippet.id}`}
-            className="block truncate font-mono text-sm text-wisteria-deep hover:underline"
+            className="block truncate rounded font-mono text-sm text-wisteria-deep hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-wisteria/50"
           >
             {snippet.id}
           </Link>
-          <div className="mt-1 flex items-center gap-2 text-xs text-ink-soft">
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-ink-soft">
             <span>{snippet.content_type}</span>
-            <span>·</span>
+            <span aria-hidden>·</span>
             <span>updated {formatDate(snippet.updated_at)}</span>
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          <CopyButton value={deliveryUrl(snippet.id)} label="Copy link" />
+          <CopyButton value={deliveryUrl(snippet.id)} label="Copy link" size="sm" />
           <Link to={`/s/${snippet.id}`}>
-            <Button variant="ghost">Details</Button>
+            <Button variant="ghost" size="sm">
+              Details
+            </Button>
           </Link>
         </div>
       </Card>
@@ -159,37 +179,39 @@ function CreateForm({ onCreated }: { onCreated: () => void }) {
         placeholders, substituted from the delivery URL query string.
       </p>
       <form onSubmit={(e) => void submit(e)} className="mt-4 space-y-4">
-        <textarea
+        <Textarea
           value={content}
           onChange={(e) => setContent(e.target.value)}
           placeholder="Hello {{name}} on port {{port}}"
           rows={6}
-          className="w-full resize-y rounded-lg border border-line bg-canvas px-3 py-2 font-mono text-sm text-ink focus:border-wisteria focus:outline-none"
+          aria-label="Snippet content"
         />
-        <div className="flex flex-wrap items-center gap-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:gap-4">
           <Combobox
             value={contentType}
             onChange={setContentType}
             options={COMMON_CONTENT_TYPES}
             placeholder="content type"
-            className="flex-1"
+            className="sm:flex-1"
           />
-          <Button type="submit" disabled={busy}>
+          <Button type="submit" loading={busy} className="w-full sm:w-auto">
             {busy ? "Creating…" : "Create"}
           </Button>
         </div>
-        {error && <ErrorBanner message={error} />}
+        {error && <Banner tone="error">{error}</Banner>}
       </form>
 
       {created && (
-        <div className="mt-4 rounded-lg border border-celadon bg-celadon/20 p-4">
-          <p className="text-sm text-ink">Created successfully.</p>
-          <div className="mt-2 flex items-center gap-2">
-            <code className="flex-1 truncate font-mono text-xs text-wisteria-deep">
-              {deliveryUrl(created.id)}
-            </code>
-            <CopyButton value={deliveryUrl(created.id)} label="Copy link" />
-          </div>
+        <div className="mt-4">
+          <Banner tone="success">
+            <p className="font-medium">Created successfully.</p>
+            <div className="mt-2 flex items-center gap-2">
+              <code className="min-w-0 flex-1 truncate font-mono text-xs text-ink">
+                {deliveryUrl(created.id)}
+              </code>
+              <CopyButton value={deliveryUrl(created.id)} label="Copy link" size="sm" />
+            </div>
+          </Banner>
         </div>
       )}
     </Card>

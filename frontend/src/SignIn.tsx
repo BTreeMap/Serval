@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useAuth } from "./auth-context";
-import { Button, Card, ErrorBanner } from "./ui";
+import { Banner, Button, Card, Field, Textarea } from "./ui";
 
 /** The sign-in gate, shown only when the backend enforces auth and the initial
  *  identity probe failed. The affordance depends on the backend's auth mode:
@@ -70,15 +70,20 @@ function TokenSignIn() {
                     Paste a bearer token issued by your identity provider.
                 </p>
                 <form onSubmit={(e) => void submit(e)} className="mt-6 space-y-4">
-                    <textarea
-                        value={token}
-                        onChange={(e) => setToken(e.target.value)}
-                        placeholder="eyJhbGciOi…"
-                        rows={4}
-                        className="w-full resize-none rounded-lg border border-line bg-canvas px-3 py-2 font-mono text-xs text-ink focus:border-wisteria focus:outline-none"
-                    />
-                    {error && <ErrorBanner message={error} />}
-                    <Button type="submit" disabled={busy} className="w-full">
+                    <Field label="Bearer token">
+                        {(field) => (
+                            <Textarea
+                                {...field}
+                                value={token}
+                                onChange={(e) => setToken(e.target.value)}
+                                placeholder="eyJhbGciOi…"
+                                rows={4}
+                                className="resize-none text-xs"
+                            />
+                        )}
+                    </Field>
+                    {error && <Banner tone="error">{error}</Banner>}
+                    <Button type="submit" loading={busy} className="w-full">
                         {busy ? "Verifying…" : "Continue"}
                     </Button>
                 </form>

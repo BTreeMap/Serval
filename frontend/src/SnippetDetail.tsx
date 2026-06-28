@@ -7,7 +7,7 @@ import {
   type HistoryItem,
   type SnippetDetail as Detail,
 } from "./api";
-import { Badge, Button, Card, CopyButton, ErrorBanner } from "./ui";
+import { Badge, Banner, Button, Card, CopyButton, Icons, Loading, Textarea } from "./ui";
 
 /** Detail view for one snippet: metadata, an editor, and the append-only
  *  version ledger with per-version preview and restore. */
@@ -36,12 +36,12 @@ export function SnippetDetail() {
   }, [refresh]);
 
   if (loading) {
-    return <p className="text-sm text-ink-soft">Loading…</p>;
+    return <Loading />;
   }
   if (error) {
     return (
       <div className="space-y-4">
-        <ErrorBanner message={error} />
+        <Banner tone="error">{error}</Banner>
         <BackLink />
       </div>
     );
@@ -60,16 +60,16 @@ export function SnippetDetail() {
             {detail.id}
           </code>
         </div>
-        <div className="flex items-center gap-2 text-xs text-ink-soft">
+        <div className="flex flex-wrap items-center gap-2 text-xs text-ink-soft">
           <span>{detail.content_type}</span>
-          <span>·</span>
+          <span aria-hidden>·</span>
           <span>{detail.history_count} version(s)</span>
         </div>
         <div className="flex items-center gap-2">
-          <code className="flex-1 truncate rounded bg-canvas px-3 py-2 font-mono text-xs text-ink-soft">
+          <code className="min-w-0 flex-1 truncate rounded bg-canvas px-3 py-2 font-mono text-xs text-ink-soft">
             {deliveryUrl(detail.id)}
           </code>
-          <CopyButton value={deliveryUrl(detail.id)} label="Copy link" />
+          <CopyButton value={deliveryUrl(detail.id)} label="Copy link" size="sm" />
         </div>
       </Card>
 
@@ -112,15 +112,15 @@ function Editor({ id, onUpdated }: { id: string; onUpdated: () => void }) {
     <Card>
       <h2 className="text-lg font-semibold">Publish a new version</h2>
       <form onSubmit={(e) => void submit(e)} className="mt-4 space-y-4">
-        <textarea
+        <Textarea
           value={content}
           onChange={(e) => setContent(e.target.value)}
           placeholder="New template content…"
           rows={6}
-          className="w-full resize-y rounded-lg border border-line bg-canvas px-3 py-2 font-mono text-sm text-ink focus:border-wisteria focus:outline-none"
+          aria-label="New version content"
         />
-        {error && <ErrorBanner message={error} />}
-        <Button type="submit" disabled={busy}>
+        {error && <Banner tone="error">{error}</Banner>}
+        <Button type="submit" loading={busy}>
           {busy ? "Publishing…" : "Publish update"}
         </Button>
       </form>
@@ -175,8 +175,11 @@ function HistoryList({
 
   return (
     <section className="space-y-3">
-      <h2 className="text-lg font-semibold">Version history</h2>
-      {error && <ErrorBanner message={error} />}
+      <h2 className="flex items-center gap-2 text-lg font-semibold">
+        <Icons.History className="h-5 w-5 text-ink-faint" aria-hidden />
+        Version history
+      </h2>
+      {error && <Banner tone="error">{error}</Banner>}
       <ol className="space-y-2">
         {history.map((entry, index) => {
           const isCurrent = index === 0;
@@ -184,9 +187,9 @@ function HistoryList({
           return (
             <li
               key={`${entry.changed_at}-${entry.target_hash}`}
-              className="space-y-3 rounded-lg border border-line bg-surface px-4 py-3"
+              className="space-y-3 rounded-lg border border-line bg-surface px-4 py-3 transition-colors hover:border-wisteria/40"
             >
-              <div className="flex items-center justify-between gap-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
                 <div className="min-w-0">
                   <code className="block truncate font-mono text-xs text-ink-soft">
                     {entry.target_hash}
@@ -195,24 +198,42 @@ function HistoryList({
                     by {entry.editor_id} · {formatDate(entry.changed_at)}
                   </span>
                 </div>
-                <div className="flex shrink-0 items-center gap-2">
+                <div className="flex shrink-0 flex-wrap items-center gap-2">
                   <Badge tone={isCurrent ? "wisteria" : "neutral"}>
                     {isCurrent ? "current" : `v${history.length - index}`}
                   </Badge>
                   <CopyButton
                     value={deliveryUrl(entry.target_hash)}
                     label="Copy link"
+                    size="sm"
                   />
-                  <Button variant="ghost" onClick={() => void view(entry.target_hash)}>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => void view(entry.target_hash)}
+                  >
+                    {isOpen ? (
+                      <Icons.EyeOff className="h-4 w-4" aria-hidden />
+                    ) : (
+                      <Icons.Eye className="h-4 w-4" aria-hidden />
+                    )}
                     {isOpen ? "Hide" : "View"}
                   </Button>
                   {!isCurrent && (
                     <Button
                       variant="secondary"
-                      disabled={busyHash === entry.target_hash}
+                      size="sm"
+                      loading={busyHash === entry.target_hash}
                       onClick={() => void restore(entry.target_hash)}
                     >
-                      {busyHash === entry.target_hash ? "Restoring…" : "Restore"}
+                      {busyHash === entry.target_hash ? (
+                        "Restoring…"
+                      ) : (
+                        <>
+                          <Icons.RotateCcw className="h-4 w-4" aria-hidden />
+                          Restore
+                        </>
+                      )}
                     </Button>
                   )}
                 </div>
@@ -232,8 +253,12 @@ function HistoryList({
 
 function BackLink() {
   return (
-    <Link to="/" className="text-sm text-wisteria-deep hover:underline">
-      ← Back to dashboard
+    <Link
+      to="/"
+      className="inline-flex items-center gap-1.5 rounded text-sm text-wisteria-deep hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-wisteria/50"
+    >
+      <Icons.ArrowLeft className="h-4 w-4" aria-hidden />
+      Back to dashboard
     </Link>
   );
 }
