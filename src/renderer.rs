@@ -27,11 +27,14 @@ static PLACEHOLDER: LazyLock<Regex> =
 /// heap allocation. The caller may then serve the original bytes directly (e.g.
 /// via `bytes::Bytes::from_owner`) rather than copying.
 #[must_use]
-pub fn render<'a>(template: &'a str, variables: &HashMap<String, String>) -> Cow<'a, str> {
+pub fn render<'a>(
+    template: &'a str,
+    variables: &HashMap<Cow<'_, str>, Cow<'_, str>>,
+) -> Cow<'a, str> {
     PLACEHOLDER.replace_all(template, |caps: &Captures<'_>| {
         let key = &caps[1];
         match variables.get(key) {
-            Some(value) => value.clone(),
+            Some(value) => value.as_ref().to_owned(),
             // Leave the original `{{key}}` literally in place.
             None => caps[0].to_string(),
         }
@@ -42,10 +45,10 @@ pub fn render<'a>(template: &'a str, variables: &HashMap<String, String>) -> Cow
 mod tests {
     use super::*;
 
-    fn vars(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+    fn vars<'a>(pairs: &[(&'a str, &'a str)]) -> HashMap<Cow<'a, str>, Cow<'a, str>> {
         pairs
             .iter()
-            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .map(|(k, v)| (Cow::Borrowed(*k), Cow::Borrowed(*v)))
             .collect()
     }
 

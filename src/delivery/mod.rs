@@ -265,13 +265,16 @@ fn etag_matches(inm: &HeaderValue, etag: &HeaderValue) -> bool {
 /// lookup in the renderer — a linear-scan structure would expose an
 /// O(placeholders × params) work factor exploitable by an attacker who sends
 /// arbitrarily many query parameters.
-fn parse_query(query: Option<&str>) -> HashMap<String, String> {
+///
+/// Keys and values that require no percent-decoding are stored as
+/// `Cow::Borrowed` slices into the query string, avoiding a heap allocation
+/// per parameter on the common clean-key path. Only percent-encoded
+/// characters produce `Cow::Owned` strings.
+fn parse_query(query: Option<&str>) -> HashMap<Cow<'_, str>, Cow<'_, str>> {
     let Some(query) = query else {
         return HashMap::new();
     };
-    form_urlencoded::parse(query.as_bytes())
-        .map(|(k, v)| (k.into_owned(), v.into_owned()))
-        .collect()
+    form_urlencoded::parse(query.as_bytes()).collect()
 }
 
 /// Resolve the response MIME type: prefer the filename extension, falling back
@@ -323,8 +326,12 @@ mod tests {
     #[test]
     fn parse_query_decodes_and_dedupes() {
         let vars = parse_query(Some("port=8080&name=hello%20world&port=9090"));
-        assert_eq!(vars.get("name").unwrap(), "hello world");
-        assert_eq!(vars.get("port").unwrap(), "9090", "last value wins");
+        assert_eq!(vars.get("name").unwrap().as_ref(), "hello world");
+        assert_eq!(
+            vars.get("port").unwrap().as_ref(),
+            "9090",
+            "last value wins"
+        );
     }
 
     #[test]
