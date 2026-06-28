@@ -62,11 +62,16 @@ Full test / E2E / Dockerized PostgreSQL commands →
   keyed BLAKE3 hash of `target_hash || raw_query` under a key distinct from the
   id MAC. An `If-None-Match` match on a verified content-addressed id returns
   `304` before any cache or DB work.
-- **Serve-stale by default.** Stale mutable entries are served immediately;
-  a single-flight background task performs a two-step refresh — step-1 probes
-  the `target_hash` only (cheap PK scan; zero data movement if unchanged),
-  step-2 pulls content only when the hash changed. Disable with
-  `CACHE_SERVE_STALE=false`. The uncached miss path stays 1-RTT unchanged.
+- **Opportunistic never-expire cache.** Mutable entries are **never time-evicted**;
+  the only removal paths are explicit Control Plane invalidation (the sole
+  freshness guarantee) and byte-budget pressure. Staleness (`CACHE_MUTABLE_TTL_SECS`
+  threshold) is a refresh *trigger*, not an eviction mechanism. By default
+  (`CACHE_SERVE_STALE=true`) a stale entry is served immediately while a lock-free
+  single-flight background task performs a two-step refresh — step-1 probes the
+  `target_hash` only (cheap PK scan; zero data movement if unchanged), step-2 pulls
+  content only when the hash changed. With `CACHE_SERVE_STALE=false` a stale read
+  revalidates synchronously before responding. The uncached miss path stays 1-RTT
+  unchanged.
 - **Don't bypass the storage layer.** Persistence goes through the shared pool;
   don't open ad-hoc DB connections inside handlers.
 - **Frontend: don't call `fetch`/`axios` directly.** Use the shared API client

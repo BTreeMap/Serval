@@ -61,7 +61,7 @@ impl Harness {
         let repo = Repository::new(pool);
 
         // The single shared cache is the crux of acceptance criterion #1.
-        let cache = DeliveryCache::new(32 * 1024 * 1024, Duration::from_secs(300), true);
+        let cache = DeliveryCache::new(32 * 1024 * 1024, Duration::from_secs(300));
         // One signer shared by both planes, exactly as the binary wires it.
         let signer = IdSigner::new(TEST_ID_SECRET);
         let auth = Arc::new(
@@ -82,7 +82,7 @@ impl Harness {
             cache,
             signer: signer.clone(),
             serve_stale: true,
-            mutable_ttl: Duration::from_secs(300),
+            refresh_after: Duration::from_secs(300),
         };
 
         let control_base = serve(api::router(control_state)).await;

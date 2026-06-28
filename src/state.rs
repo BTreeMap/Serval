@@ -35,10 +35,13 @@ pub struct DeliveryState {
     pub cache: DeliveryCache,
     /// Verifies the route-id MAC before any cache or database lookup.
     pub signer: IdSigner,
-    /// Whether to serve stale mutable entries immediately while a background
-    /// single-flight refresh brings the cache up to date.
+    /// Whether to serve stale mutable entries opportunistically (immediate
+    /// response + background refresh) or synchronously (revalidate before
+    /// responding). Either way entries are never time-evicted from the cache;
+    /// only invalidation or byte-budget pressure removes them.
     pub serve_stale: bool,
-    /// Base freshness window for mutable cache entries. Used to compute
-    /// `Cache-Control: stale-while-revalidate` and staleness checks.
-    pub mutable_ttl: Duration,
+    /// Staleness threshold for mutable cache entries. An entry older than this
+    /// triggers a background refresh. Also used as the
+    /// `stale-while-revalidate` and `max-age` header value.
+    pub refresh_after: Duration,
 }

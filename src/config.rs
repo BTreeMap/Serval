@@ -24,9 +24,21 @@ pub struct Config {
     /// best-effort guess from its own location.
     pub data_plane_url: Option<String>,
     pub cache_byte_budget: u64,
+    /// Threshold after which a mutable cache entry is considered stale and
+    /// triggers a background refresh. Also used as the `max-age` /
+    /// `stale-while-revalidate` value in `Cache-Control`. Controlled by
+    /// `CACHE_MUTABLE_TTL_SECS` (default 300 s).
     pub cache_mutable_ttl: Duration,
-    /// Whether to serve stale mutable entries immediately while refreshing in
-    /// the background. Defaults to `true`. Disable with `CACHE_SERVE_STALE=false`.
+    /// Controls the stale-hit strategy for mutable cache entries. Entries are
+    /// **never time-evicted**; only Control Plane invalidation or byte-budget
+    /// pressure removes them.
+    ///
+    /// - `true` (default, opportunistic): a stale entry is served immediately;
+    ///   a lock-free single-flight background refresh updates the cache.
+    /// - `false` (blocking): a stale read triggers a synchronous two-step
+    ///   revalidation before the response is sent.
+    ///
+    /// Disable opportunistic mode with `CACHE_SERVE_STALE=false`.
     pub serve_stale: bool,
     /// Deployment-wide secret salt for the route-id MAC. Keep it stable across
     /// a deployment (rotating it invalidates every existing permalink/alias)

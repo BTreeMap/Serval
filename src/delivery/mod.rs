@@ -11,10 +11,13 @@
 //!    cached `target_hash` and raw query; return `304` if it matches, else
 //!    render and serve.  Fresh hits with `If-None-Match` run a cheap step-1
 //!    probe (one PK scan on `routes`) so the `304` is never stale.
-//! 4. **Serve-stale** — stale mutable entries (age > `mutable_ttl` but within
-//!    the `2 × mutable_ttl` moka window) are served immediately; a single-flight
-//!    background task then performs a two-step refresh: step-1 checks whether
-//!    the hash changed (cheap), step-2 pulls content only if it did.
+//! 4. **Opportunistic serve-stale** — stale mutable entries (age >
+//!    `refresh_after`) are served immediately while a lock-free single-flight
+//!    background task performs a two-step refresh: step-1 checks whether the
+//!    hash changed (cheap), step-2 pulls content only if it did. Entries are
+//!    **never time-evicted**; the only removal paths are explicit Control Plane
+//!    invalidation and byte-budget pressure. When `CACHE_SERVE_STALE=false`
+//!    (blocking mode) a stale hit revalidates synchronously before responding.
 //! 5. **Miss** — unchanged 1-RTT `fetch_for_delivery` → render → `200`.
 
 use std::collections::HashMap;
@@ -113,7 +116,7 @@ async fn deliver(
 
     let raw_query = query.unwrap_or("").as_bytes();
     let inm = headers.get(header::IF_NONE_MATCH);
-    let ttl_secs = state.mutable_ttl.as_secs();
+    let ttl_secs = state.refresh_after.as_secs();
 
     // Immutable shortcut: for content-addressed ids the ETag is just `"<id>"`.
     // If the client already holds that exact validator, return 304 before the
@@ -222,14 +225,43 @@ async fn deliver(
                 )
             };
 
-            // Stale hit: serve immediately, then fire the single-flight refresh.
+            // Stale hit: serve immediately (opportunistic) or revalidate
+            // synchronously (blocking), depending on the serve_stale toggle.
             if is_stale {
-                let stale_hash = Arc::clone(&snippet.target_hash);
-                let repo = state.repo.clone();
-                let cache = state.cache.clone();
-                let bg_id = id.clone();
-                if cache.try_claim_refresh(&bg_id).await {
-                    tokio::spawn(background_refresh(repo, cache, bg_id, stale_hash));
+                if state.serve_stale {
+                    // Opportunistic: serve the cached bytes now, fire a
+                    // lock-free single-flight refresh in the background.
+                    let repo = state.repo.clone();
+                    let cache = state.cache.clone();
+                    let bg_id = id.clone();
+                    let entry = Arc::clone(&snippet);
+                    if entry.try_claim_refresh() {
+                        tokio::spawn(background_refresh(repo, cache, bg_id, entry));
+                    }
+                } else {
+                    // Blocking: revalidate inline before responding so the
+                    // client always gets a current response.
+                    let refreshed = inline_refresh(&state.repo, &state.cache, &id).await;
+                    if let Some(fresh) = refreshed {
+                        let fresh_etag = compute_etag(
+                            raw_id,
+                            fresh.cache_mode,
+                            &fresh.target_hash,
+                            raw_query,
+                            state,
+                        );
+                        if let Some(v) = inm
+                            && etag_matches(v, &fresh_etag)
+                        {
+                            return build_not_modified(
+                                fresh_etag,
+                                cache_control_for(fresh.cache_mode, ttl_secs, state.serve_stale),
+                            );
+                        }
+                        return build_ok(
+                            &fresh, filename, query, raw_query, fresh_etag, ttl_secs, state,
+                        );
+                    }
                 }
             }
 
@@ -252,43 +284,104 @@ async fn deliver(
 ///
 /// Step-1: cheap hash probe — if the route's `target_hash` is unchanged, just
 /// reset the entry's freshness timer (zero data movement). Step-2: only if the
-/// hash changed, pull the full content and re-insert. The single-flight guard is
-/// released when the task completes.
+/// hash changed, pull the full content and re-insert. The per-entry
+/// `AtomicBool` refresh flag is cleared when the task completes or errors.
 async fn background_refresh(
     repo: Repository,
     cache: DeliveryCache,
     id: RouteId,
-    stale_hash: Arc<str>,
+    entry: Arc<CachedSnippet>,
 ) {
     match repo.fetch_target_hash(&id).await {
-        Ok(Some(ref current_hash)) if current_hash.as_str() != stale_hash.as_ref() => {
-            // Hash changed: step-2 data pull.
+        Ok(Some(ref current_hash)) if current_hash.as_str() != entry.target_hash.as_ref() => {
+            // Hash changed: step-2 data pull. The new entry starts with a clean
+            // refresh flag (AtomicBool::new(false) in From<DeliveryRecord>).
             match repo.fetch_for_delivery(&id).await {
                 Ok(Some(record)) => {
                     cache.insert(&id, record).await;
+                    // Step completed; old entry's flag is no longer relevant
+                    // (new entry carries a fresh false flag).
                 }
                 Ok(None) => {
+                    // Entry evicted; no flag to clear.
                     cache.invalidate(&id).await;
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "background refresh step-2 failed");
+                    entry.finish_refresh();
                 }
             }
         }
         Ok(Some(_)) => {
             // Hash unchanged: reset the freshness timer — zero data movement.
-            if let Some((entry, _)) = cache.get_cached(&id).await {
-                cache.touch(&id, entry).await;
-            }
+            // `touch` inserts a new entry with a fresh AtomicBool.
+            cache.touch(&id, Arc::clone(&entry)).await;
         }
         Ok(None) => {
             // No live route (immutable id or deleted): nothing to refresh.
+            // Don't clear the flag — the stale entry stays cached and the
+            // refresh flag prevents a retry pile-up for a gone id.
         }
         Err(e) => {
             tracing::warn!(error = %e, "background refresh step-1 failed");
+            entry.finish_refresh();
         }
     }
-    cache.finish_refresh(&id).await;
+}
+
+/// Synchronous inline revalidation for the blocking serve-stale=false mode.
+///
+/// Runs the same two-step probe as the background refresh but on the calling
+/// goroutine. Returns the up-to-date snippet (from cache or fresh DB load), or
+/// `None` if the route no longer exists.
+async fn inline_refresh(
+    repo: &Repository,
+    cache: &DeliveryCache,
+    id: &RouteId,
+) -> Option<Arc<CachedSnippet>> {
+    match repo.fetch_target_hash(id).await {
+        Ok(Some(ref current_hash)) => {
+            // Check cached hash to decide if a step-2 pull is needed.
+            let cached_hash = cache
+                .get_cached(id)
+                .await
+                .map(|(e, _)| Arc::clone(&e.target_hash));
+            if cached_hash.as_deref() != Some(current_hash.as_str()) {
+                // Hash changed or not cached: step-2 data pull.
+                match repo.fetch_for_delivery(id).await {
+                    Ok(Some(record)) => {
+                        let fresh = cache.insert(id, record).await;
+                        Some(fresh)
+                    }
+                    Ok(None) => {
+                        cache.invalidate(id).await;
+                        None
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "inline refresh step-2 failed");
+                        // Fall back to stale entry if available.
+                        cache.get_cached(id).await.map(|(e, _)| e)
+                    }
+                }
+            } else {
+                // Hash unchanged: reset freshness timer, return existing entry.
+                if let Some((entry, _)) = cache.get_cached(id).await {
+                    cache.touch(id, Arc::clone(&entry)).await;
+                    Some(entry)
+                } else {
+                    None
+                }
+            }
+        }
+        Ok(None) => {
+            cache.invalidate(id).await;
+            None
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "inline refresh step-1 failed");
+            cache.get_cached(id).await.map(|(e, _)| e)
+        }
+    }
 }
 
 /// Map a load failure to a response, logging only genuine database errors.

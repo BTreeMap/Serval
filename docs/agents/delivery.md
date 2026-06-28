@@ -17,8 +17,8 @@ telemetry or analytics state — it is intentionally stateless beyond the cache.
    or database work**. This stateless admission gate is the DoS mitigation — an
    attacker without the deployment secret cannot mint an id that reaches
    PostgreSQL. The rejection is indistinguishable from "not found".
-3. Look up the `moka` cache for the `(content, content_type, cache_mode)` tuple
-   keyed by `id`.
+3. Look up the `moka` cache for the `(content, content_type, cache_mode,
+   target_hash)` tuple keyed by `id`.
 4. On miss, resolve the id in a **single round trip** and store the result in
    `moka`. Both delivery cases are expressed as two primary-key probes under one
    `UNION ALL`, so a live route always wins and the content-addressed path is
@@ -51,14 +51,29 @@ telemetry or analytics state — it is intentionally stateless beyond the cache.
 5. Resolve the MIME type from the `*filename` extension via `mime_guess`,
    falling back to the stored `content_type`.
 6. Render the content with the query variables through `renderer.rs`.
-7. Return `200 OK` with a `Cache-Control` header derived from **how the id
-   resolved**: a live route → short TTL, `must-revalidate`; a content-addressed
-   version → long-lived `immutable`.
+7. Return `200 OK` with `ETag` and `Cache-Control` headers derived from **how
+   the id resolved**: a live route → `max-age=<refresh_after>,
+   stale-while-revalidate=<refresh_after>` (opportunistic) or `must-revalidate`
+   (blocking); a content-addressed version → `immutable`.
 
 ## Cache constraints
 
-- Use the **`moka`** crate, asynchronous, bounded to **1,000 entries**
-  (~20 MiB). This absorbs read spikes before they reach PostgreSQL.
+- Use the **`moka`** crate, asynchronous, byte-budget bounded. The cache is
+  **opportunistic** and **never time-evicts** entries.
+- **Two eviction paths only:**
+  1. **Explicit Control Plane invalidation** — `cache.invalidate(id)` on every
+     write. This is the sole freshness guarantee (acceptance criterion #1).
+  2. **Byte-budget pressure** — moka's LRU weigher evicts the least-recently-used
+     entry when total byte weight exceeds `CACHE_BYTE_BUDGET`.
+- Staleness (`CACHE_MUTABLE_TTL_SECS`, default 300 s) is a **refresh trigger**
+  only. A mutable entry older than this threshold is served immediately
+  (`CACHE_SERVE_STALE=true`, default) while a lock-free background refresh
+  updates the cache, or revalidated synchronously before responding
+  (`CACHE_SERVE_STALE=false`). Either way the entry is never dropped by time.
+- The lock-free single-flight guard is a per-entry `AtomicBool` inside
+  `CachedSnippet`. The first stale reader wins a `compare_exchange(false→true)`
+  and spawns the background task; all other concurrent stale readers skip it.
+  No global lock, no per-id allocation.
 - The cache is **read-through**; never let it serve stale content after a write.
 
 ## Cross-thread invalidation (critical)
