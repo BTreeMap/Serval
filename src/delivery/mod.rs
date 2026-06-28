@@ -118,19 +118,17 @@ async fn deliver(
     let inm = headers.get(header::IF_NONE_MATCH);
 
     // Immutable shortcut: for content-addressed ids the ETag is just `"<id>"`.
-    // If the client already holds that exact validator, return 304 before the
-    // cache or database are consulted — the verified id IS the content address,
-    // so no further proof is needed.
-    let immutable_etag_str = format!("\"{}\"", raw_id);
-    if let Some(v) = inm
+    // Build the string only when the client sent If-None-Match — skips one
+    // format! per request without a validator (the common cold-cache first load)
+    // and per mutable-route request where the immutable ETag is never relevant.
+    // Carry the string forward into compute_etag to avoid a second format!.
+    let prebuilt_immutable_etag: Option<String> = inm.map(|_| format!("\"{}\"", raw_id));
+    if let (Some(v), Some(s)) = (inm, &prebuilt_immutable_etag)
         && v.to_str()
-            .map(|s| s.trim() == immutable_etag_str)
+            .map(|sv| sv.trim() == s.as_str())
             .unwrap_or(false)
     {
-        return build_not_modified(
-            str_to_header(&immutable_etag_str),
-            cache_control_for(CacheMode::Immutable),
-        );
+        return build_not_modified(str_to_header(s), cache_control_for(CacheMode::Immutable));
     }
 
     // Read-through the cache: a hit returns immediately; concurrent misses are
@@ -160,6 +158,7 @@ async fn deliver(
         &snippet.target_hash,
         raw_query,
         state,
+        prebuilt_immutable_etag.as_deref(),
     );
     if let Some(v) = inm
         && etag_matches(v, &etag)
@@ -241,9 +240,13 @@ fn compute_etag(
     target_hash: &str,
     raw_query: &[u8],
     state: &DeliveryState,
+    prebuilt_immutable: Option<&str>,
 ) -> HeaderValue {
     match mode {
-        CacheMode::Immutable => str_to_header(&format!("\"{}\"", raw_id)),
+        CacheMode::Immutable => match prebuilt_immutable {
+            Some(s) => str_to_header(s),
+            None => str_to_header(&format!("\"{}\"", raw_id)),
+        },
         CacheMode::Mutable => mutable_etag(target_hash, raw_query, state),
     }
 }

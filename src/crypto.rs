@@ -149,10 +149,12 @@ impl IdSigner {
     /// method.
     #[must_use]
     pub fn etag(&self, target_hash: &str, raw_query: &[u8]) -> String {
-        let mut message = Vec::with_capacity(target_hash.len() + raw_query.len());
-        message.extend_from_slice(target_hash.as_bytes());
-        message.extend_from_slice(raw_query);
-        let tag = blake3::keyed_hash(&self.etag_key, &message);
+        // Stream both inputs through the hasher instead of heap-allocating a
+        // temporary Vec to concatenate them — equivalent output, one fewer alloc.
+        let mut hasher = blake3::Hasher::new_keyed(&self.etag_key);
+        hasher.update(target_hash.as_bytes());
+        hasher.update(raw_query);
+        let tag = hasher.finalize();
         let encoded = URL_SAFE_NO_PAD.encode(tag.as_bytes());
         format!("\"{}\"", encoded)
     }
