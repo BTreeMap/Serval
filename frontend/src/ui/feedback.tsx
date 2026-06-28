@@ -30,7 +30,7 @@ export function Banner({
     return (
         <div
             role={tone === "error" ? "alert" : "status"}
-            className={`flex items-start gap-2.5 rounded-lg border px-4 py-3 text-sm ${wrap}`}
+            className={`flex items-start gap-3 rounded-lg border px-4 py-3 text-sm ${wrap}`}
         >
             <Icon className="mt-0.5 h-4 w-4 shrink-0" />
             <div className="min-w-0 flex-1">{children}</div>

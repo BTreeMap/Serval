@@ -80,10 +80,10 @@ export function Dashboard() {
           <ul className="space-y-3">
             {[0, 1, 2].map((i) => (
               <li key={i}>
-                <Card className="flex items-center justify-between gap-4 p-4">
+                <Card className="flex items-center justify-between gap-4 p-4 md:p-5 lg:p-6">
                   <div className="min-w-0 flex-1 space-y-2">
-                    <Skeleton className="h-4 w-2/3" />
-                    <Skeleton className="h-3 w-1/3" />
+                    <Skeleton className="h-4 w-48 sm:w-56 md:w-64" />
+                    <Skeleton className="h-3 w-24 sm:w-32 md:w-40" />
                   </div>
                   <Skeleton className="h-8 w-24" />
                 </Card>
@@ -112,7 +112,7 @@ export function Dashboard() {
 function SnippetRow({ snippet }: { snippet: SnippetSummary }) {
   return (
     <li>
-      <Card className="flex flex-col gap-3 p-4 transition-colors hover:border-wisteria/40 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
+      <Card className="flex flex-col gap-3 p-4 transition-colors hover:border-wisteria/40 sm:flex-row sm:items-center sm:justify-between sm:gap-4 md:p-5 lg:gap-6 lg:p-6">
         <div className="min-w-0">
           <Link
             to={`/s/${snippet.id}`}

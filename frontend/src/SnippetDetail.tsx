@@ -187,9 +187,9 @@ function HistoryList({
           return (
             <li
               key={`${entry.changed_at}-${entry.target_hash}`}
-              className="space-y-3 rounded-lg border border-line bg-surface px-4 py-3 transition-colors hover:border-wisteria/40"
+              className="space-y-3 rounded-lg border border-line bg-surface px-4 py-3 transition-colors hover:border-wisteria/40 md:px-5 md:py-4 lg:px-6"
             >
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4 lg:gap-6">
                 <div className="min-w-0">
                   <code className="block truncate font-mono text-xs text-ink-soft">
                     {entry.target_hash}
@@ -255,7 +255,7 @@ function BackLink() {
   return (
     <Link
       to="/"
-      className="inline-flex items-center gap-1.5 rounded text-sm text-wisteria-deep hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-wisteria/50"
+      className="inline-flex items-center gap-2 rounded text-sm text-wisteria-deep hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-wisteria/50"
     >
       <Icons.ArrowLeft className="h-4 w-4" aria-hidden />
       Back to dashboard

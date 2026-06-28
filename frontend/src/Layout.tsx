@@ -9,7 +9,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
     return (
         <div className="min-h-full bg-canvas text-ink">
             <header className="sticky top-0 z-20 border-b border-line bg-surface/70 backdrop-blur">
-                <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-x-4 gap-y-2 px-4 py-3 sm:px-6 sm:py-4">
+                <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-x-4 gap-y-2 px-4 py-3 sm:px-6 sm:py-4 lg:px-8 lg:py-5">
                     <Link
                         to="/"
                         className="flex items-center gap-2 rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-wisteria/50"
@@ -19,7 +19,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
                     </Link>
                     {me && (
                         <div className="flex min-w-0 items-center gap-2 sm:gap-3">
-                            <span className="max-w-[10rem] truncate text-sm text-ink-soft sm:max-w-xs">
+                            <span className="max-w-40 truncate text-sm text-ink-soft sm:max-w-xs md:max-w-sm">
                                 {me.user_id}
                             </span>
                             {me.is_admin && <Badge tone="wisteria">admin</Badge>}
@@ -31,7 +31,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
                     )}
                 </div>
             </header>
-            <main className="mx-auto max-w-5xl px-4 py-6 sm:px-6 sm:py-8">{children}</main>
+            <main className="mx-auto max-w-5xl px-4 py-6 sm:px-6 sm:py-8 lg:px-8 lg:py-10">{children}</main>
         </div>
     );
 }

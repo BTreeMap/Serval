@@ -94,7 +94,7 @@ export function Combobox({
                 <ul
                     id={listId}
                     role="listbox"
-                    className="absolute z-10 mt-1 max-h-60 w-full overflow-auto rounded-lg border border-line bg-surface py-1 shadow-pop"
+                    className="absolute z-10 mt-1 max-h-64 w-full overflow-auto rounded-lg border border-line bg-surface py-2 shadow-pop"
                 >
                     {matches.map((option, index) => (
                         <li
