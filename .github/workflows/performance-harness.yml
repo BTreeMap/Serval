@@ -39,14 +39,15 @@ jobs:
       - name: Install Rust toolchain
         run: rustup show
 
-      # Restore-only cache policy: this workflow reuses warm integration cache
-      # entries for speed but never writes back, so high-variance performance
-      # builds cannot perturb trusted cache contents.
+      # Release-profile cache: keyed separately from the debug integration cache
+      # because debug and release artifacts are not interchangeable. Saving on
+      # main means each subsequent run (push or scheduled) only recompiles
+      # changed crates instead of starting cold every time.
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
-          key: integration
-          save-if: "false"
+          key: performance
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Run performance harness
         run: cargo test --release --features integration --test performance_harness -- --ignored --nocapture
