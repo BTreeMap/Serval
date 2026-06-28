@@ -18,8 +18,11 @@
 //! Freshness rests entirely on Control Plane invalidation, which requires both
 //! planes to share one cache handle in one process (see [`crate::cache`]).
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+use bytes::Bytes;
 
 use axum::Router;
 use axum::extract::{Path, RawQuery, State};
@@ -177,6 +180,15 @@ fn load_error_response(err: &Arc<LoadError>) -> Response {
     }
 }
 
+/// A newtype that lets an `Arc<str>` be wrapped in `bytes::Bytes::from_owner`,
+/// giving a zero-copy `Bytes` view over content already on the heap.
+struct ArcStr(Arc<str>);
+impl AsRef<[u8]> for ArcStr {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+}
+
 /// Build a `200 OK` response rendering the snippet against the query variables.
 fn build_ok(
     snippet: &CachedSnippet,
@@ -185,7 +197,15 @@ fn build_ok(
     etag: HeaderValue,
 ) -> Response {
     let variables = parse_query(query);
-    let body = renderer::render(&snippet.content, &variables);
+    // `render` returns `Cow::Borrowed` when no substitutions occur — the regex
+    // engine makes zero heap allocations and the content is untouched.
+    // We exploit that: the Borrowed path clones the Arc (two atomics, no memcpy)
+    // and wraps it in `Bytes::from_owner`, giving a truly zero-copy response
+    // body. The Owned path moves the rendered String into Bytes, also zero-copy.
+    let body: Bytes = match renderer::render(&snippet.content, &variables) {
+        Cow::Borrowed(_) => Bytes::from_owner(ArcStr(Arc::clone(&snippet.content))),
+        Cow::Owned(s) => Bytes::from(s),
+    };
     let content_type = resolve_content_type(filename, &snippet.content_type);
     let cc = cache_control_for(snippet.cache_mode);
     (

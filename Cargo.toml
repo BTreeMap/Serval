@@ -76,6 +76,9 @@ form_urlencoded = "1"
 # MIME resolution
 mime_guess = "2"
 
+# Zero-copy response bodies: Bytes::from_owner wraps Arc<str> without memcpy
+bytes = "1"
+
 # Embedded frontend (virtual file system)
 rust-embed = { version = "8", features = ["mime-guess"] }
 

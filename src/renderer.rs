@@ -6,6 +6,7 @@
 //! key is absent from the supplied variables is left **verbatim** — this is the
 //! "tolerant rendering" guarantee the Data Plane depends on.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
@@ -21,18 +22,20 @@ static PLACEHOLDER: LazyLock<Regex> =
 ///
 /// Runs in `O(N)` over the template length: `Regex::replace_all` performs a
 /// single scan and never backtracks for this anchored, finite grammar.
+///
+/// Returns `Cow::Borrowed(template)` when no substitution occurs, avoiding any
+/// heap allocation. The caller may then serve the original bytes directly (e.g.
+/// via `bytes::Bytes::from_owner`) rather than copying.
 #[must_use]
-pub fn render(template: &str, variables: &HashMap<String, String>) -> String {
-    PLACEHOLDER
-        .replace_all(template, |caps: &Captures<'_>| {
-            let key = &caps[1];
-            match variables.get(key) {
-                Some(value) => value.clone(),
-                // Leave the original `{{key}}` literally in place.
-                None => caps[0].to_string(),
-            }
-        })
-        .into_owned()
+pub fn render<'a>(template: &'a str, variables: &HashMap<String, String>) -> Cow<'a, str> {
+    PLACEHOLDER.replace_all(template, |caps: &Captures<'_>| {
+        let key = &caps[1];
+        match variables.get(key) {
+            Some(value) => value.clone(),
+            // Leave the original `{{key}}` literally in place.
+            None => caps[0].to_string(),
+        }
+    })
 }
 
 #[cfg(test)]
