@@ -30,7 +30,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use tower_http::set_header::SetResponseHeaderLayer;
 
-use crate::cache::{CachedSnippet, DeliveryCache};
+use crate::cache::{CachedSnippet, DeliveryCache, RefreshGuard};
 use crate::db::Repository;
 use crate::db::models::{CacheMode, RouteId};
 use crate::renderer;
@@ -230,13 +230,14 @@ async fn deliver(
             if is_stale {
                 if state.serve_stale {
                     // Opportunistic: serve the cached bytes now, fire a
-                    // lock-free single-flight refresh in the background.
-                    let repo = state.repo.clone();
-                    let cache = state.cache.clone();
-                    let bg_id = id.clone();
-                    let entry = Arc::clone(&snippet);
-                    if entry.try_claim_refresh() {
-                        tokio::spawn(background_refresh(repo, cache, bg_id, entry));
+                    // lock-free single-flight refresh in the background. The
+                    // RAII guard releases the claim on drop, so the entry can
+                    // never be frozen out of future refreshes.
+                    if let Some(guard) = RefreshGuard::try_acquire(&snippet) {
+                        let repo = state.repo.clone();
+                        let cache = state.cache.clone();
+                        let bg_id = id.clone();
+                        tokio::spawn(background_refresh(repo, cache, bg_id, guard));
                     }
                 } else {
                     // Blocking: revalidate inline before responding so the
@@ -284,49 +285,48 @@ async fn deliver(
 ///
 /// Step-1: cheap hash probe — if the route's `target_hash` is unchanged, just
 /// reset the entry's freshness timer (zero data movement). Step-2: only if the
-/// hash changed, pull the full content and re-insert. The per-entry
-/// `AtomicBool` refresh flag is cleared when the task completes or errors.
+/// hash changed, pull the full content and re-insert. The `RefreshGuard`
+/// releases the single-flight claim when this task ends — on success, error, or
+/// panic — so the entry can always be re-claimed for a future refresh.
 async fn background_refresh(
     repo: Repository,
     cache: DeliveryCache,
     id: RouteId,
-    entry: Arc<CachedSnippet>,
+    guard: RefreshGuard,
 ) {
+    let entry = guard.entry();
     match repo.fetch_target_hash(&id).await {
         Ok(Some(ref current_hash)) if current_hash.as_str() != entry.target_hash.as_ref() => {
-            // Hash changed: step-2 data pull. The new entry starts with a clean
-            // refresh flag (AtomicBool::new(false) in From<DeliveryRecord>).
+            // Hash changed: step-2 data pull. The replacement entry carries a
+            // fresh refresh flag; releasing this (old) entry's claim on drop is
+            // harmless because the old entry is no longer reachable.
             match repo.fetch_for_delivery(&id).await {
                 Ok(Some(record)) => {
                     cache.insert(&id, record).await;
-                    // Step completed; old entry's flag is no longer relevant
-                    // (new entry carries a fresh false flag).
                 }
                 Ok(None) => {
-                    // Entry evicted; no flag to clear.
                     cache.invalidate(&id).await;
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "background refresh step-2 failed");
-                    entry.finish_refresh();
                 }
             }
         }
         Ok(Some(_)) => {
             // Hash unchanged: reset the freshness timer — zero data movement.
-            // `touch` inserts a new entry with a fresh AtomicBool.
-            cache.touch(&id, Arc::clone(&entry)).await;
+            cache.touch(&id, Arc::clone(entry)).await;
         }
         Ok(None) => {
-            // No live route (immutable id or deleted): nothing to refresh.
-            // Don't clear the flag — the stale entry stays cached and the
-            // refresh flag prevents a retry pile-up for a gone id.
+            // The route no longer exists. Evict the orphaned entry so the next
+            // read misses and resolves to a 404 — leaving it cached would serve
+            // deleted content indefinitely.
+            cache.invalidate(&id).await;
         }
         Err(e) => {
             tracing::warn!(error = %e, "background refresh step-1 failed");
-            entry.finish_refresh();
         }
     }
+    // `guard` drops here, releasing the single-flight claim.
 }
 
 /// Synchronous inline revalidation for the blocking serve-stale=false mode.

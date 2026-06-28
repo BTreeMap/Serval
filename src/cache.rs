@@ -51,37 +51,77 @@ pub struct CachedSnippet {
     pub target_hash: Arc<str>,
     /// Wall-clock time of insertion, used to identify stale entries.
     inserted_at: Instant,
-    /// Lock-free single-flight refresh guard. The first caller that flips this
-    /// from `false` to `true` via `compare_exchange` owns the refresh; all
-    /// others skip. Cleared (reset to `false`) on completion or error.
+    /// Lock-free single-flight refresh guard. Exactly one caller can flip this
+    /// from `false` to `true` via [`RefreshGuard::try_acquire`]; the claim is
+    /// released when the returned guard is dropped (including on panic).
     refreshing: AtomicBool,
 }
 
 impl CachedSnippet {
     /// Approximate heap footprint, used as the cache weight. The constant
-    /// covers the `Arc` allocations, the key string, and node overhead;
-    /// exactness is unnecessary since this only drives eviction pressure.
+    /// covers the `Arc` allocations, the moka key, node overhead, and the
+    /// fixed-width 64-byte signed content id stored in `target_hash` (always
+    /// exactly 64 chars), so only the variable-length fields are measured.
     fn weight(&self) -> u32 {
-        const OVERHEAD: usize = 160;
-        (self.content.len() + self.content_type.len() + self.target_hash.len() + OVERHEAD)
-            .min(u32::MAX as usize) as u32
+        const OVERHEAD: usize = 224;
+        (self.content.len() + self.content_type.len() + OVERHEAD).min(u32::MAX as usize) as u32
     }
 }
 
 impl CachedSnippet {
-    /// Try to claim the exclusive right to run a background refresh for this
-    /// entry. Returns `true` if the caller won the claim; `false` if a refresh
-    /// is already in progress. The winner must call [`Self::finish_refresh`]
-    /// when done (or if it errors) so future stale reads can re-claim.
-    pub fn try_claim_refresh(&self) -> bool {
-        self.refreshing
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
+    /// Read the (sole) field that needs ordering with the refresh flag: this is
+    /// a convenience for the guard's `Drop`. Kept private to the module.
+    fn release_refresh(&self) {
+        // `Release` so the `false` becomes visible to the next claimer's
+        // `Acquire` CAS, establishing the happens-before that a try-lock needs.
+        self.refreshing.store(false, Ordering::Release);
+    }
+}
+
+/// An RAII single-flight refresh claim.
+///
+/// Acquired via [`RefreshGuard::try_acquire`]; the flag is released when the
+/// guard is dropped — including on early return, error, or panic. This makes
+/// the "stuck `true`" state unrepresentable: there is no code path that can
+/// hold the claim without a live guard, so an entry can never be frozen out of
+/// future refreshes by a forgotten release.
+///
+/// The guard owns an `Arc` to the entry it claimed. After a refresh replaces
+/// the entry in the cache, releasing the *old* entry's flag is harmless: the
+/// old entry is unreachable, and the replacement carries its own fresh flag.
+#[must_use = "dropping the guard immediately releases the refresh claim"]
+pub struct RefreshGuard {
+    entry: Arc<CachedSnippet>,
+}
+
+impl RefreshGuard {
+    /// Try to claim the exclusive right to refresh `entry`. Returns `Some` to
+    /// exactly one caller while a refresh is in flight; every other caller gets
+    /// `None` and should skip (serving the stale entry).
+    pub fn try_acquire(entry: &Arc<CachedSnippet>) -> Option<Self> {
+        // Try-lock idiom: `Acquire` on success synchronizes-with the previous
+        // holder's `Release`; `Relaxed` on failure since we touch no shared
+        // state when we lose the race. Only one thread can observe the
+        // `false -> true` transition, so at most one refresh is ever spawned.
+        entry
+            .refreshing
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .ok()
+            .map(|_| Self {
+                entry: Arc::clone(entry),
+            })
     }
 
-    /// Release the refresh claim so a future stale read can retry.
-    pub fn finish_refresh(&self) {
-        self.refreshing.store(false, Ordering::Release);
+    /// The entry whose refresh this guard owns.
+    #[must_use]
+    pub fn entry(&self) -> &Arc<CachedSnippet> {
+        &self.entry
+    }
+}
+
+impl Drop for RefreshGuard {
+    fn drop(&mut self) {
+        self.entry.release_refresh();
     }
 }
 
@@ -392,7 +432,8 @@ mod tests {
 
     #[tokio::test]
     async fn single_flight_guard_blocks_concurrent_refresh() {
-        // The per-entry AtomicBool ensures at most one refresh fires per entry.
+        // The per-entry AtomicBool ensures at most one refresh fires per entry,
+        // and the RAII guard releases the claim on drop.
         let cache = DeliveryCache::new(1 << 20, Duration::from_secs(300));
         let id = test_id();
         cache
@@ -401,17 +442,17 @@ mod tests {
             .unwrap();
         let (entry, _) = cache.get_cached(&id).await.expect("entry present");
 
-        assert!(entry.try_claim_refresh(), "first claim must succeed");
+        let g1 = RefreshGuard::try_acquire(&entry);
+        assert!(g1.is_some(), "first claim must succeed");
         assert!(
-            !entry.try_claim_refresh(),
+            RefreshGuard::try_acquire(&entry).is_none(),
             "second claim while first is in-flight must fail"
         );
-        entry.finish_refresh();
+        drop(g1);
         assert!(
-            entry.try_claim_refresh(),
-            "claim after finish must succeed again"
+            RefreshGuard::try_acquire(&entry).is_some(),
+            "claim after the guard is dropped must succeed again"
         );
-        entry.finish_refresh();
     }
 
     #[tokio::test]
