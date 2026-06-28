@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
   api,
@@ -7,7 +7,7 @@ import {
   type HistoryItem,
   type SnippetDetail as Detail,
 } from "./api";
-import { Badge, Banner, Button, Card, Combobox, CopyButton, Icons, Input, Loading, Textarea } from "./ui";
+import { Badge, Banner, Button, Card, Combobox, CopyButton, Icons, Loading, Textarea } from "./ui";
 import { COMMON_CONTENT_TYPES } from "./content-types";
 
 /** Detail view for one snippet: metadata, an editor, and the append-only
@@ -36,6 +36,14 @@ export function SnippetDetail() {
     void refresh();
   }, [refresh]);
 
+  const updateAnnotation = useCallback(
+    async (patch: { title: string } | { description: string }) => {
+      await api.updateSnippet(id, patch);
+      await refresh();
+    },
+    [id, refresh],
+  );
+
   if (loading) {
     return <Loading />;
   }
@@ -55,38 +63,38 @@ export function SnippetDetail() {
     <div className="space-y-6">
       <BackLink />
 
-      <Card className="space-y-3">
-        <div className="flex items-center justify-between gap-4">
-          <div className="min-w-0">
-            {detail.title && (
-              <p className="truncate text-base font-semibold text-ink">{detail.title}</p>
-            )}
-            <code className="block truncate font-mono text-sm text-wisteria-deep">
-              {detail.id}
-            </code>
-          </div>
-        </div>
-        <div className="space-y-1.5">
-          <TitleEditor
-            id={detail.id}
+      <Card className="space-y-4">
+        <div className="space-y-0.5">
+          <InlineField
             value={detail.title ?? null}
-            onUpdated={() => void refresh()}
+            onSave={(next) => updateAnnotation({ title: next })}
+            placeholder="Untitled snippet"
+            ariaLabel="title"
+            displayClass="text-2xl font-semibold tracking-tight text-ink"
           />
-          <DescriptionEditor
-            id={detail.id}
+          <InlineField
             value={detail.description ?? null}
+            onSave={(next) => updateAnnotation({ description: next })}
+            placeholder="Add a description…"
+            ariaLabel="description"
+            multiline
+            rows={3}
+            displayClass="text-sm leading-relaxed text-ink-soft"
+          />
+        </div>
+
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-ink-soft">
+          <code className="truncate font-mono text-wisteria-deep">{detail.id}</code>
+          <span aria-hidden>·</span>
+          <ContentTypeEditor
+            id={detail.id}
+            value={detail.content_type}
             onUpdated={() => void refresh()}
           />
-          <div className="flex flex-wrap items-center gap-2 text-xs text-ink-soft">
-            <ContentTypeEditor
-              id={detail.id}
-              value={detail.content_type}
-              onUpdated={() => void refresh()}
-            />
-            <span aria-hidden>·</span>
-            <span>{detail.history_count} version(s)</span>
-          </div>
+          <span aria-hidden>·</span>
+          <span>{detail.history_count} version(s)</span>
         </div>
+
         <div className="flex items-center gap-2">
           <code className="min-w-0 flex-1 truncate rounded bg-canvas px-3 py-2 font-mono text-xs text-ink-soft">
             {deliveryUrl(detail.id)}
@@ -231,21 +239,35 @@ function ContentTypeEditor({
   );
 }
 
-/** Inline editor for a snippet's optional title annotation. An empty save
- *  clears the title. Appends no version to the history ledger. */
-function TitleEditor({
-  id,
+/** A seamless, Notion-style inline field. In display mode it reads as plain
+ *  text — or a faint placeholder when empty — and reveals an edit affordance on
+ *  hover. Clicking turns it into a borderless input that matches the displayed
+ *  typography exactly, so editing feels in-place rather than form-like. Saving
+ *  is always explicit: Enter (⌘/Ctrl+Enter for multiline) or the Save button;
+ *  Escape cancels. Saving an empty value clears the annotation. Changing an
+ *  annotation appends no version to the history ledger. */
+function InlineField({
   value,
-  onUpdated,
+  onSave,
+  placeholder,
+  ariaLabel,
+  displayClass,
+  multiline = false,
+  rows = 3,
 }: {
-  id: string;
   value: string | null;
-  onUpdated: () => void;
+  onSave: (next: string) => Promise<void>;
+  placeholder: string;
+  ariaLabel: string;
+  displayClass: string;
+  multiline?: boolean;
+  rows?: number;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(value ?? "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement | null>(null);
 
   const open = () => {
     setDraft(value ?? "");
@@ -253,18 +275,36 @@ function TitleEditor({
     setEditing(true);
   };
 
+  const cancel = () => {
+    setEditing(false);
+    setError(null);
+  };
+
+  // On entering edit mode, focus the control and place the caret at the end.
+  useEffect(() => {
+    if (!editing) {
+      return;
+    }
+    const el = inputRef.current;
+    if (!el) {
+      return;
+    }
+    el.focus();
+    const end = el.value.length;
+    el.setSelectionRange(end, end);
+  }, [editing]);
+
   const save = async () => {
     const next = draft.trim();
     if (next === (value ?? "")) {
-      setEditing(false);
+      cancel();
       return;
     }
     setBusy(true);
     setError(null);
     try {
-      await api.updateSnippet(id, { title: next });
+      await onSave(next);
       setEditing(false);
-      onUpdated();
     } catch (err) {
       setError(messageOf(err));
     } finally {
@@ -272,136 +312,76 @@ function TitleEditor({
     }
   };
 
-  if (!editing) {
-    return (
-      <div className="flex items-center gap-1 text-sm">
-        {value ? (
-          <span className="text-ink">{value}</span>
-        ) : (
-          <span className="text-ink-faint">No title</span>
-        )}
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          onClick={open}
-          title="Edit title"
-          className="h-auto p-0.5"
-        >
-          <Icons.Pencil className="h-3.5 w-3.5" aria-hidden />
-        </Button>
-      </div>
-    );
-  }
-
-  return (
-    <div className="flex flex-wrap items-center gap-2">
-      <Input
-        value={draft}
-        onChange={(e) => setDraft(e.target.value)}
-        placeholder="Snippet title…"
-        className="max-w-sm flex-1"
-        aria-label="Title"
-      />
-      <Button size="sm" loading={busy} onClick={() => void save()}>
-        {busy ? "Saving…" : "Save"}
-      </Button>
-      <Button
-        variant="ghost"
-        size="sm"
-        onClick={() => setEditing(false)}
-        disabled={busy}
-      >
-        Cancel
-      </Button>
-      {error && <Banner tone="error">{error}</Banner>}
-    </div>
-  );
-}
-
-/** Inline editor for a snippet's optional description annotation. An empty
- *  save clears the description. Appends no version to the history ledger. */
-function DescriptionEditor({
-  id,
-  value,
-  onUpdated,
-}: {
-  id: string;
-  value: string | null;
-  onUpdated: () => void;
-}) {
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(value ?? "");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const open = () => {
-    setDraft(value ?? "");
-    setError(null);
-    setEditing(true);
-  };
-
-  const save = async () => {
-    const next = draft.trim();
-    if (next === (value ?? "")) {
-      setEditing(false);
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    try {
-      await api.updateSnippet(id, { description: next });
-      setEditing(false);
-      onUpdated();
-    } catch (err) {
-      setError(messageOf(err));
-    } finally {
-      setBusy(false);
+  const onKeyDown = (event: React.KeyboardEvent) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      cancel();
+    } else if (event.key === "Enter" && (!multiline || event.metaKey || event.ctrlKey)) {
+      event.preventDefault();
+      void save();
     }
   };
 
   if (!editing) {
     return (
-      <div className="flex items-center gap-1 text-sm">
-        {value ? (
-          <span className="text-ink-soft">{value}</span>
-        ) : (
-          <span className="text-ink-faint">No description</span>
-        )}
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          onClick={open}
-          title="Edit description"
-          className="h-auto p-0.5"
-        >
-          <Icons.Pencil className="h-3.5 w-3.5" aria-hidden />
-        </Button>
-      </div>
+      <button
+        type="button"
+        onClick={open}
+        aria-label={`Edit ${ariaLabel}`}
+        className={`group/field -mx-2 flex w-full items-start gap-2 rounded-md px-2 py-1 text-left transition-colors hover:bg-canvas focus:outline-none focus-visible:ring-2 focus-visible:ring-wisteria/40 ${displayClass}`}
+      >
+        <span className={`min-w-0 flex-1 ${multiline ? "whitespace-pre-wrap break-words" : "truncate"}`}>
+          {value ?? <span className="font-normal text-ink-faint">{placeholder}</span>}
+        </span>
+        <Icons.Pencil
+          className="mt-1 h-3.5 w-3.5 shrink-0 text-ink-faint opacity-0 transition-opacity group-hover/field:opacity-100"
+          aria-hidden
+        />
+      </button>
     );
   }
 
+  const controlClass = `w-full rounded-md bg-canvas px-2 py-1 placeholder:text-ink-faint ring-1 ring-wisteria/40 transition focus:outline-none focus-visible:ring-2 focus-visible:ring-wisteria/60 ${displayClass}`;
+
   return (
-    <div className="flex flex-wrap items-center gap-2">
-      <Input
-        value={draft}
-        onChange={(e) => setDraft(e.target.value)}
-        placeholder="Snippet description…"
-        className="max-w-lg flex-1"
-        aria-label="Description"
-      />
-      <Button size="sm" loading={busy} onClick={() => void save()}>
-        {busy ? "Saving…" : "Save"}
-      </Button>
-      <Button
-        variant="ghost"
-        size="sm"
-        onClick={() => setEditing(false)}
-        disabled={busy}
-      >
-        Cancel
-      </Button>
+    <div className="-mx-2 space-y-2">
+      {multiline ? (
+        <textarea
+          ref={(el) => {
+            inputRef.current = el;
+          }}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={onKeyDown}
+          placeholder={placeholder}
+          rows={rows}
+          aria-label={ariaLabel}
+          className={`${controlClass} resize-none`}
+        />
+      ) : (
+        <input
+          ref={(el) => {
+            inputRef.current = el;
+          }}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={onKeyDown}
+          placeholder={placeholder}
+          aria-label={ariaLabel}
+          className={controlClass}
+        />
+      )}
+      <div className="flex flex-wrap items-center gap-2 px-2">
+        <Button size="sm" loading={busy} onClick={() => void save()}>
+          {busy ? "Saving…" : "Save"}
+        </Button>
+        <Button variant="ghost" size="sm" onClick={cancel} disabled={busy}>
+          Cancel
+        </Button>
+        <span className="text-xs text-ink-faint">
+          {multiline ? "⌘/Ctrl+Enter to save · Esc to cancel" : "Enter to save · Esc to cancel"}
+        </span>
+      </div>
       {error && <Banner tone="error">{error}</Banner>}
     </div>
   );
