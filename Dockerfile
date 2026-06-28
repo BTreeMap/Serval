@@ -18,14 +18,16 @@ WORKDIR /app
 
 # Cache dependency compilation: copy manifests, then fetch.
 COPY Cargo.toml Cargo.lock rust-toolchain.toml build.rs ./
-RUN mkdir -p src && echo "fn main() {}" > src/main.rs \
+RUN mkdir -p src benches && echo "fn main() {}" > src/main.rs \
     && echo "" > src/lib.rs \
+    && echo "fn main() {}" > benches/data_plane_hot_path.rs \
     && mkdir -p frontend/dist && echo "<!doctype html>" > frontend/dist/index.html \
     && SERVAL_SKIP_FRONTEND_BUILD=1 cargo build --release --locked || true
-RUN rm -rf src
+RUN rm -rf src benches
 
 # Build for real against the source and the prebuilt frontend.
 COPY src ./src
+COPY benches ./benches
 COPY --from=frontend /app/frontend/dist ./frontend/dist
 ENV SERVAL_SKIP_FRONTEND_BUILD=1
 RUN cargo build --release --locked
