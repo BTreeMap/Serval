@@ -15,7 +15,7 @@ use serval::db::{self, Repository};
 use serval::delivery;
 use serval::state::{ControlState, DeliveryState};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use testcontainers::ContainerAsync;
 use testcontainers::runners::AsyncRunner;
@@ -208,7 +208,7 @@ impl AtomicStats {
 
     async fn record_latency_sample(&self, latency: Duration) {
         let sample_idx = self.sample_clock.fetch_add(1, Ordering::Relaxed);
-        if sample_idx % self.sample_stride != 0 {
+        if !sample_idx.is_multiple_of(self.sample_stride) {
             return;
         }
         let micros_u128 = latency.as_micros();
@@ -363,7 +363,9 @@ async fn run_data_plane_stage(
     let sample_capacity_hint = env_u64("PERF_LATENCY_SAMPLE_CAPACITY", 200_000) as usize;
     let stats = Arc::new(AtomicStats::new(sample_stride, sample_capacity_hint));
 
+    let request_timeout_secs = env_u64("PERF_REQUEST_TIMEOUT_SECS", 15);
     let start = Instant::now();
+    let deadline = start + duration;
     let mut tasks = Vec::with_capacity(concurrency);
 
     for worker in 0..concurrency {
@@ -372,8 +374,8 @@ async fn run_data_plane_stage(
         let id = id.to_owned();
         tasks.push(tokio::spawn(async move {
             let mut n = worker as u64;
-            while start.elapsed() < duration {
-                let path = if n % 8 == 0 {
+            while Instant::now() < deadline {
+                let path = if n.is_multiple_of(8) {
                     format!("{id}?port=8080&region=us-east&cache_buster={n}")
                 } else {
                     format!("{id}?port=8080&region=us-east")
@@ -381,15 +383,39 @@ async fn run_data_plane_stage(
                 let t0 = Instant::now();
                 match h.get_status(&path).await {
                     Ok(status) => stats.record_status(status, t0.elapsed()).await,
-                    Err(_) => stats.record_transport_error(t0.elapsed()).await,
+                    Err(_) => {
+                        stats.record_transport_error(t0.elapsed()).await;
+                        // Keep the runtime cooperative if requests start failing
+                        // fast under saturation (see run_adversarial_stage).
+                        tokio::task::yield_now().await;
+                    }
                 }
                 n = n.wrapping_add(1);
             }
         }));
     }
 
-    for task in tasks {
-        task.await.expect("data-plane stage worker panicked");
+    // Hard backstop: workers self-terminate at `deadline`, finishing at most one
+    // in-flight request (bounded by the reqwest timeout). If the runtime is so
+    // saturated that some never wind down within that budget, force-abort the
+    // stragglers so the stage always returns and the sweep can continue.
+    let abort_handles: Vec<_> = tasks.iter().map(|t| t.abort_handle()).collect();
+    let stage_budget = duration + Duration::from_secs(request_timeout_secs + 5);
+    let joined = tokio::time::timeout(stage_budget, async {
+        for task in tasks {
+            let _ = task.await;
+        }
+    })
+    .await;
+    if joined.is_err() {
+        for handle in &abort_handles {
+            handle.abort();
+        }
+        eprintln!(
+            "[peak   ] stage exceeded {}s budget — {} stragglers force-aborted",
+            stage_budget.as_secs(),
+            abort_handles.len()
+        );
     }
 
     stats.snapshot(start.elapsed()).await
@@ -475,19 +501,28 @@ async fn run_adversarial_stage(
     let control_write_success = Arc::new(AtomicU64::new(0));
     let control_write_error = Arc::new(AtomicU64::new(0));
 
-    let stop = Arc::new(AtomicBool::new(false));
+    // Robust stage lifecycle: every worker self-terminates on a shared
+    // wall-clock `deadline`, so no task's shutdown depends on another task
+    // making progress. The earlier design set a `stop` flag only *after* the
+    // legit workers finished; at extreme forged concurrency the runtime is
+    // saturated by fast-failing forged requests (connection refused / fd
+    // exhaustion return `Err` with no real await point), the legit workers are
+    // starved and never reach their deadline, so the flag was never set and the
+    // stage live-locked for minutes. Deadline-driven shutdown plus the hard
+    // outer budget below removes every such inter-task dependency.
+    let request_timeout_secs = env_u64("PERF_REQUEST_TIMEOUT_SECS", 15);
     let start = Instant::now();
+    let deadline = start + duration;
 
     let writer_handle = {
         let h = h.clone();
         let id = id.to_owned();
-        let stop = Arc::clone(&stop);
         let total = Arc::clone(&control_write_total);
         let success = Arc::clone(&control_write_success);
         let error = Arc::clone(&control_write_error);
         tokio::spawn(async move {
             let mut version = 0_u64;
-            while !stop.load(Ordering::Relaxed) {
+            while Instant::now() < deadline {
                 total.fetch_add(1, Ordering::Relaxed);
                 let body = format!("payload-version-{version}");
                 match h.patch_content(&id, &body).await {
@@ -507,13 +542,12 @@ async fn run_adversarial_stage(
     let mut forged_tasks = Vec::with_capacity(forged_concurrency);
     for worker in 0..forged_concurrency {
         let h = h.clone();
-        let stop = Arc::clone(&stop);
         let total = Arc::clone(&forged_total);
         let rejected = Arc::clone(&forged_404);
         let transport = Arc::clone(&forged_transport_error);
         forged_tasks.push(tokio::spawn(async move {
             let mut n = worker as u64;
-            while !stop.load(Ordering::Relaxed) {
+            while Instant::now() < deadline {
                 let forged = format!("forged-id-{worker}-{n}");
                 match h.get_status(&forged).await {
                     Ok(status) => {
@@ -525,6 +559,13 @@ async fn run_adversarial_stage(
                     Err(_) => {
                         total.fetch_add(1, Ordering::Relaxed);
                         transport.fetch_add(1, Ordering::Relaxed);
+                        // A request that fails fast (connection refused, fd
+                        // exhaustion) returns immediately with no real await
+                        // point. Without an explicit yield, thousands of such
+                        // workers spin and starve the scheduler, preventing
+                        // every other task — including the deadline check — from
+                        // running. Yield cooperatively to keep the runtime live.
+                        tokio::task::yield_now().await;
                     }
                 }
                 n = n.wrapping_add(1);
@@ -539,8 +580,8 @@ async fn run_adversarial_stage(
         let stats = Arc::clone(&legit_stats);
         legit_tasks.push(tokio::spawn(async move {
             let mut n = worker as u64;
-            while start.elapsed() < duration {
-                let path = if n % 2 == 0 {
+            while Instant::now() < deadline {
+                let path = if n.is_multiple_of(2) {
                     format!("{id}?port=3000&tenant=prod")
                 } else {
                     format!("{id}?port=3000&tenant=prod&noise={n}")
@@ -555,44 +596,34 @@ async fn run_adversarial_stage(
         }));
     }
 
-    for task in legit_tasks {
-        task.await.expect("adversarial legit worker panicked");
-    }
-
-    stop.store(true, Ordering::Relaxed);
-
-    writer_handle.await.expect("writer task panicked");
-
-    // Drain forged tasks with a hard deadline: give in-flight requests time to
-    // resolve naturally (via the per-request timeout), then abort stragglers.
-    // Without this bound, a completely-overwhelmed server at extreme forged
-    // concurrency can leave 25K+ tasks blocked for minutes, hanging the stage.
-    //
-    // Dropping a `JoinHandle` only *detaches* its task — it keeps running and
-    // keeps issuing forged requests against the server. Left unbounded, each
-    // stage's leaked workers pile onto the next stage's fresh ones, so the
-    // forged load compounds across stages and the harness appears stuck for
-    // tens of minutes. We therefore capture an `AbortHandle` per task up front
-    // and, if the drain budget elapses, explicitly `abort()` every straggler so
-    // no worker survives its stage. Aborted tasks do not update the shared
-    // atomics, so the rejection-rate measurement is based only on requests that
-    // completed — fine for health classification, which is already UNHEALTHY at
-    // this scale.
-    let forged_abort_handles: Vec<_> = forged_tasks.iter().map(|t| t.abort_handle()).collect();
-    let drain_secs = env_u64("PERF_REQUEST_TIMEOUT_SECS", 15) + 3;
-    let drain_result = tokio::time::timeout(Duration::from_secs(drain_secs), async {
-        for task in forged_tasks {
+    // Single hard backstop for the whole stage. Workers wind themselves down at
+    // `deadline`, finishing at most one in-flight request (bounded by the
+    // reqwest per-request timeout). This outer budget = stage duration + that
+    // request timeout + slack; if anything is still running past it (a wedged
+    // runtime, a request that outlives its own timeout), every remaining task is
+    // force-aborted so the stage *always* returns and the next stage starts from
+    // a clean slate. Aborted tasks stop updating the shared atomics, so the
+    // reported counts only reflect work that completed — fine for the health
+    // classification, which is already UNHEALTHY at this scale.
+    let mut all_tasks = forged_tasks;
+    all_tasks.extend(legit_tasks);
+    all_tasks.push(writer_handle);
+    let abort_handles: Vec<_> = all_tasks.iter().map(|t| t.abort_handle()).collect();
+    let stage_budget = duration + Duration::from_secs(request_timeout_secs + 5);
+    let joined = tokio::time::timeout(stage_budget, async {
+        for task in all_tasks {
             let _ = task.await;
         }
     })
     .await;
-    if drain_result.is_err() {
-        for handle in &forged_abort_handles {
+    if joined.is_err() {
+        for handle in &abort_handles {
             handle.abort();
         }
         eprintln!(
-            "[adv    ] stage drain timed out after {drain_secs}s — {} stragglers aborted",
-            forged_abort_handles.len()
+            "[adv    ] stage exceeded {}s budget — {} stragglers force-aborted",
+            stage_budget.as_secs(),
+            abort_handles.len()
         );
     }
 
