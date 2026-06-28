@@ -6,6 +6,8 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use socket2::{Domain, Protocol, Socket, Type};
+use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tokio::signal;
 
@@ -116,25 +118,68 @@ async fn serve(config: Config, repo: Repository) -> Result<()> {
                 config.control_plane_addr
             )
         })?;
-    let delivery_listener = TcpListener::bind(config.data_plane_addr)
-        .await
-        .with_context(|| format!("failed to bind data plane on {}", config.data_plane_addr))?;
+
+    // Bind one delivery socket per Tokio worker thread with SO_REUSEPORT.
+    // The kernel distributes incoming SYNs across all listening sockets,
+    // eliminating the single accept-loop bottleneck: each worker thread gets
+    // its own kernel-side accept queue and accepts connections independently.
+    let worker_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .max(1);
+    let delivery_addr: SocketAddr = config.data_plane_addr;
+    let mut delivery_listeners = Vec::with_capacity(worker_threads);
+    for _ in 0..worker_threads {
+        let sock = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))
+            .context("socket2: create delivery socket")?;
+        sock.set_reuse_port(true)
+            .context("socket2: SO_REUSEPORT on delivery socket")?;
+        sock.set_reuse_address(true)
+            .context("socket2: SO_REUSEADDR on delivery socket")?;
+        sock.set_nonblocking(true)
+            .context("socket2: set_nonblocking on delivery socket")?;
+        sock.bind(&delivery_addr.into())
+            .with_context(|| format!("socket2: bind delivery socket to {delivery_addr}"))?;
+        sock.listen(65535)
+            .context("socket2: listen on delivery socket")?;
+        let std_listener = std::net::TcpListener::from(sock);
+        let tokio_listener = TcpListener::from_std(std_listener)
+            .context("socket2: convert delivery socket to tokio TcpListener")?;
+        delivery_listeners.push(tokio_listener);
+    }
 
     tracing::info!(
         control_plane = %config.control_plane_addr,
         data_plane = %config.data_plane_addr,
+        delivery_listeners = delivery_listeners.len(),
         "serval is listening"
     );
 
     let control = axum::serve(control_listener, control_app)
         .with_graceful_shutdown(shutdown_signal("control plane"));
-    let delivery = axum::serve(delivery_listener, delivery_app)
-        .with_graceful_shutdown(shutdown_signal("data plane"));
 
-    // Run both concurrently; abort the moment either server fails.
+    // Spawn one delivery server task per SO_REUSEPORT socket.
+    let delivery_handles: Vec<_> = delivery_listeners
+        .into_iter()
+        .map(|listener| {
+            let app = delivery_app.clone();
+            tokio::spawn(async move {
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(shutdown_signal("data plane"))
+                    .await
+                    .expect("delivery plane server error");
+            })
+        })
+        .collect();
+
     tokio::try_join!(
         async { control.await.context("control plane server error") },
-        async { delivery.await.context("data plane server error") },
+        async {
+            for h in delivery_handles {
+                h.await.context("delivery task panicked")?;
+            }
+            Ok(())
+        },
     )?;
 
     tracing::info!("serval shut down cleanly");

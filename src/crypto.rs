@@ -159,19 +159,25 @@ impl IdSigner {
         format!("\"{}\"", encoded)
     }
 
-    /// Verify that `id` carries a MAC this signer would produce.    ///
+    /// Verify that `id` carries a MAC this signer would produce.
+    ///
     /// Decodes the id, recomputes the MAC over its prefix, and compares in
     /// constant time. Returns `false` for any malformed, wrong-length, or
     /// forged id. This is the Data Plane's stateless admission gate.
+    ///
+    /// The decode writes into a fixed-size stack array — no heap allocation is
+    /// performed, which matters at adversarial scale where this function runs
+    /// hundreds of thousands of times per second to reject forged ids.
     #[must_use]
     pub fn verify(&self, id: &str) -> bool {
-        let Ok(bytes) = URL_SAFE_NO_PAD.decode(id) else {
+        let mut buf = [0u8; ID_BYTE_LEN];
+        let Ok(n) = URL_SAFE_NO_PAD.decode_slice(id, &mut buf) else {
             return false;
         };
-        if bytes.len() != ID_BYTE_LEN {
+        if n != ID_BYTE_LEN {
             return false;
         }
-        let (prefix, mac) = bytes.split_at(PREFIX_LEN);
+        let (prefix, mac) = buf.split_at(PREFIX_LEN);
         let expected = self.mac(prefix);
         expected.ct_eq(mac).into()
     }

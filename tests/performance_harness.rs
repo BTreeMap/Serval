@@ -562,8 +562,23 @@ async fn run_adversarial_stage(
     stop.store(true, Ordering::Relaxed);
 
     writer_handle.await.expect("writer task panicked");
-    for task in forged_tasks {
-        task.await.expect("forged task panicked");
+
+    // Drain forged tasks with a hard deadline: give in-flight requests time to
+    // resolve naturally (via the per-request timeout), then abort stragglers.
+    // Without this bound, a completely-overwhelmed server at extreme forged
+    // concurrency can leave 25K+ tasks blocked for minutes, hanging the stage.
+    // Aborted tasks do not update the shared atomics, so the rejection-rate
+    // measurement is based only on requests that completed — this is fine for
+    // health classification, which will already be UNHEALTHY at this scale.
+    let drain_secs = env_u64("PERF_REQUEST_TIMEOUT_SECS", 15) + 3;
+    let drain_result = tokio::time::timeout(Duration::from_secs(drain_secs), async {
+        for task in forged_tasks {
+            let _ = task.await;
+        }
+    })
+    .await;
+    if drain_result.is_err() {
+        eprintln!("[adv    ] stage drain timed out after {drain_secs}s — stragglers abandoned");
     }
 
     let legit = legit_stats.snapshot(start.elapsed()).await;
