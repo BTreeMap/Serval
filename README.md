@@ -14,10 +14,11 @@ substitution over plain HTTP `GET`.
   keyed by a signed content id `Base64URL(BLAKE3(content) || keyed-MAC)`. The
   same 20KB config uploaded 1,000 times is stored exactly once — absolute
   byte-level deduplication.
-- **Immutable permalinks & mutable aliases.** A permalink's URL is the signed
-  content id itself (identical text always yields the identical URL under a
-  fixed deployment secret). Aliases are mutable pointers you can repoint over
-  time.
+- **Every snippet is editable.** A snippet is an unguessable, signed route you
+  publish new versions to over time. Each version's content is also addressable
+  internally by its content hash — a deterministic, immutable pointer to that
+  exact revision the Data Plane can serve directly — but that is a delivery
+  detail, never a separate user-facing kind of snippet.
 - **Forgery-proof ids (DoS mitigation).** Every id carries a keyed MAC over its
   prefix, so the Data Plane rejects forged or enumerated ids with a
   constant-time check before any cache or database lookup. See
@@ -26,8 +27,9 @@ substitution over plain HTTP `GET`.
   standard query parameters (`GET /<id>?port=8080`). Unprovided placeholders are
   left intact as literal text — universally client-compatible, no special
   request format required.
-- **Versioned history.** Every alias update is recorded in an infinite,
-  append-only ledger so prior content states stay auditable.
+- **Versioned history.** Every update is recorded in an infinite, append-only
+  ledger so prior content states stay auditable — and any of them can be viewed
+  or restored.
 - **Embedded dashboard.** A React/Vite management UI is bundled into the binary;
   no separate frontend deployment needed.
 
@@ -46,8 +48,8 @@ Plane cache, so updates are reflected on the very next read.
 ### Storage layout
 
 - `content_blocks` — deduplicated, immutable raw payloads, addressed by hash.
-- `routes` — active aliases/permalinks pointing at a content hash, with MIME
-  type and cache mode.
+- `routes` — active, editable snippet pointers at a content hash, with MIME
+  type.
 - `pointer_history` — append-only audit ledger of every pointer change.
 
 See [docs/agents/database.md](docs/agents/database.md) for the full schema.
@@ -121,24 +123,31 @@ The Control Plane speaks JSON under `/api`. With the default `AUTH_MODE=none`
 every request is the local superuser, so no token is needed for local use.
 
 ```bash
-# Create a mutable alias (random id) holding a template
+# Create a snippet holding a template (returns an unguessable, signed id)
 curl -s -X POST http://localhost:8080/api/snippets \
   -H 'content-type: application/json' \
-  -d '{"content":"Hello {{name}} on {{port}}","immutable":false}'
-# => {"id":"<alias>","immutable":false, ...}
+  -d '{"content":"Hello {{name}} on {{port}}"}'
+# => {"id":"<id>", ...}
 
 # Fetch it from the Data Plane, substituting variables from the query string
-curl "http://localhost:3000/<alias>?name=world&port=8080"
+curl "http://localhost:3000/<id>?name=world&port=8080"
 # => Hello world on 8080   ({{name}}/{{port}} filled; unknown vars stay literal)
 
-# Publish a new version (mutable aliases only); the next GET reflects it
-curl -s -X PATCH http://localhost:8080/api/snippets/<alias> \
+# Publish a new version; the next GET reflects it
+curl -s -X PATCH http://localhost:8080/api/snippets/<id> \
   -H 'content-type: application/json' -d '{"content":"Goodbye"}'
 
-# Create an immutable permalink: the id *is* the content hash
-curl -s -X POST http://localhost:8080/api/snippets \
-  -H 'content-type: application/json' \
-  -d '{"content":"pinned forever","immutable":true}'
+# Inspect a snippet and its version ledger
+curl -s http://localhost:8080/api/snippets/<id>
+# => {"id":"<id>","history":[{"target_hash":"<hash>", ...}, ...], ...}
+
+# Restore an earlier version (repoints the snippet, appends a new version)
+curl -s -X POST http://localhost:8080/api/snippets/<id>/restore \
+  -H 'content-type: application/json' -d '{"target_hash":"<hash>"}'
+
+# A version's content is also addressable directly by its hash on the Data
+# Plane (a deterministic, immutable pointer to that exact revision)
+curl "http://localhost:3000/<hash>"
 ```
 
 When `AUTH_MODE=oauth`, send `Authorization: Bearer <jwt>`; identity comes from

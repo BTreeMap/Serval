@@ -143,6 +143,41 @@ impl Harness {
         resp.json().await.expect("detail json")
     }
 
+    /// `GET /api/snippets/{id}/versions/{hash}`, returning the version JSON.
+    async fn version(&self, id: &str, hash: &str) -> Value {
+        let resp = self
+            .client
+            .get(format!(
+                "{}/api/snippets/{id}/versions/{hash}",
+                self.control_base
+            ))
+            .send()
+            .await
+            .expect("version request");
+        assert!(
+            resp.status().is_success(),
+            "version failed: {}",
+            resp.status()
+        );
+        resp.json().await.expect("version json")
+    }
+
+    /// `POST /api/snippets/{id}/restore` repointing the snippet to `hash`.
+    async fn restore(&self, id: &str, hash: &str) {
+        let resp = self
+            .client
+            .post(format!("{}/api/snippets/{id}/restore", self.control_base))
+            .json(&json!({ "target_hash": hash }))
+            .send()
+            .await
+            .expect("restore request");
+        assert!(
+            resp.status().is_success(),
+            "restore failed: {}",
+            resp.status()
+        );
+    }
+
     /// `GET {data}/{path}` on the Data Plane, returning the body and headers.
     async fn deliver(&self, path: &str) -> (String, reqwest::header::HeaderMap) {
         let resp = self
@@ -191,9 +226,7 @@ async fn serve(router: axum::Router) -> String {
 async fn cross_thread_invalidation() {
     let h = Harness::start().await;
 
-    let created = h
-        .create(json!({ "content": "version one", "immutable": false }))
-        .await;
+    let created = h.create(json!({ "content": "version one" })).await;
     let id = created["id"].as_str().expect("id").to_owned();
 
     // Warm the Data Plane cache with v1.
@@ -214,46 +247,102 @@ async fn cross_thread_invalidation() {
 async fn tolerant_rendering() {
     let h = Harness::start().await;
 
-    let created = h
-        .create(json!({ "content": "{{uuid}} on {{port}}", "immutable": false }))
-        .await;
+    let created = h.create(json!({ "content": "{{uuid}} on {{port}}" })).await;
     let id = created["id"].as_str().expect("id").to_owned();
 
     let (body, _) = h.deliver(&format!("{id}?port=8080")).await;
     assert_eq!(body, "{{uuid}} on 8080");
 }
 
-/// Acceptance criterion #3: an immutable permalink's id is exactly the signed
-/// content id `Base64URL(BLAKE3(content) || keyed-MAC)` — deterministic under
-/// the deployment secret and extension-independent.
+/// Acceptance criterion #3: a version's content hash is the signed content id
+/// `Base64URL(BLAKE3(content) || keyed-MAC)` — deterministic under the
+/// deployment secret and extension-independent — and the Data Plane serves that
+/// hash directly as an immutable version pointer. Permalinks are an internal
+/// content-addressing detail: snippets themselves are created with random ids.
 #[tokio::test]
-async fn permalink_purity() {
+async fn content_addressed_delivery() {
     let h = Harness::start().await;
 
     let content = "deterministic content";
     let expected = h.signer.content_id(content);
 
-    let first = h
-        .create(json!({ "content": content, "immutable": true }))
-        .await;
-    let id = first["id"].as_str().expect("id").to_owned();
+    // A snippet is created with an unguessable, random id — never the hash.
+    let created = h.create(json!({ "content": content })).await;
+    let id = created["id"].as_str().expect("id").to_owned();
     assert_eq!(id.len(), 64);
-    assert_eq!(id, expected, "permalink id is not the signed content id");
-    assert!(h.signer.verify(&id), "permalink id must carry a valid MAC");
-    assert_eq!(first["immutable"], json!(true));
+    assert_ne!(
+        id, expected,
+        "snippet ids must be random, not the content id"
+    );
 
-    // Re-creating identical content yields the identical id.
-    let second = h
-        .create(json!({ "content": content, "immutable": true }))
-        .await;
-    assert_eq!(second["id"].as_str().unwrap(), id);
+    // Its current version's hash IS the signed content id, and is itself a
+    // valid, MAC-bearing id.
+    let detail = h.detail(&id).await;
+    let hash = detail["history"][0]["target_hash"]
+        .as_str()
+        .expect("target_hash")
+        .to_owned();
+    assert_eq!(hash, expected, "version hash is not the signed content id");
+    assert_eq!(hash.len(), 64);
+    assert!(
+        h.signer.verify(&hash),
+        "content hash must carry a valid MAC"
+    );
 
-    // A cosmetic filename changes the served MIME but never the id.
-    let (body, headers) = h.deliver(&format!("{id}/snippet.json")).await;
+    // The Data Plane serves that hash directly, immutably cached. A cosmetic
+    // filename changes the served MIME but never the address.
+    let (body, headers) = h.deliver(&format!("{hash}/snippet.json")).await;
     assert_eq!(body, content);
     assert_eq!(
         headers.get("content-type").and_then(|v| v.to_str().ok()),
         Some("application/json")
+    );
+    let cache_control = headers
+        .get("cache-control")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    assert!(
+        cache_control.contains("immutable"),
+        "a content-addressed version must be immutably cached, got {cache_control:?}"
+    );
+}
+
+/// Restoring repoints a snippet back to an earlier version's content and records
+/// the restore as a fresh ledger entry — history only ever grows.
+#[tokio::test]
+async fn restore_repoints_and_appends_history() {
+    let h = Harness::start().await;
+
+    let created = h.create(json!({ "content": "original" })).await;
+    let id = created["id"].as_str().expect("id").to_owned();
+
+    h.update(&id, "edited").await;
+
+    // History is newest-first: index 0 is "edited", the last is "original".
+    let detail = h.detail(&id).await;
+    let history = detail["history"].as_array().expect("history");
+    assert_eq!(history.len(), 2);
+    let original_hash = history
+        .last()
+        .and_then(|e| e["target_hash"].as_str())
+        .expect("original hash")
+        .to_owned();
+
+    // The earlier version's content is still retrievable verbatim.
+    let version = h.version(&id, &original_hash).await;
+    assert_eq!(version["content"], json!("original"));
+
+    // Restore repoints the live snippet and the next Data Plane GET reflects it.
+    h.restore(&id, &original_hash).await;
+    let (body, _) = h.deliver(&id).await;
+    assert_eq!(body, "original", "restore did not repoint the snippet");
+
+    // The restore appended a third ledger row — nothing was pruned.
+    let detail = h.detail(&id).await;
+    assert_eq!(
+        detail["history_count"].as_u64(),
+        Some(3),
+        "restore must append a new version, not rewrite history"
     );
 }
 
@@ -282,9 +371,7 @@ async fn forged_ids_are_rejected_by_the_data_plane() {
     );
 
     // A genuine, signed alias is admitted and served.
-    let created = h
-        .create(json!({ "content": "genuine", "immutable": false }))
-        .await;
+    let created = h.create(json!({ "content": "genuine" })).await;
     let id = created["id"].as_str().expect("id");
     assert!(h.signer.verify(id), "harness must mint valid ids");
     let (body, _) = h.deliver(id).await;
@@ -297,9 +384,7 @@ async fn forged_ids_are_rejected_by_the_data_plane() {
 async fn infinite_ledger() {
     let h = Harness::start().await;
 
-    let created = h
-        .create(json!({ "content": "v0", "immutable": false }))
-        .await;
+    let created = h.create(json!({ "content": "v0" })).await;
     let id = created["id"].as_str().expect("id").to_owned();
 
     for i in 1..=100 {

@@ -19,18 +19,32 @@ telemetry or analytics state — it is intentionally stateless beyond the cache.
    PostgreSQL. The rejection is indistinguishable from "not found".
 3. Look up the `moka` cache for the `(content, content_type, cache_mode)` tuple
    keyed by `id`.
-4. On miss, run the index join and store the result in `moka`:
-   ```sql
-   SELECT c.content, r.content_type, r.cache_mode
-   FROM routes r
-   INNER JOIN content_blocks c ON c.hash_id = r.target_hash
-   WHERE r.id = $1;
-   ```
+4. On miss, resolve the id in two steps and store the result in `moka`:
+   - **Live route** — run the index join. If a route owns the id, serve its
+     current content; it may be repointed by its owner, so it is cached as
+     **mutable** (short TTL):
+     ```sql
+     SELECT c.content, r.content_type
+     FROM routes r
+     INNER JOIN content_blocks c ON c.hash_id = r.target_hash
+     WHERE r.id = $1;
+     ```
+   - **Content-addressed fallback** — if no route owns the id, the verified id
+     may itself be a content hash naming one exact stored version. Serve that
+     block directly and cache it as **immutable** (it can never change):
+     ```sql
+     SELECT content FROM content_blocks WHERE hash_id = $1;
+     ```
+     This is the internal "version permalink" path — a deterministic address for
+     a single revision, never a separate user-facing snippet kind. A block
+     carries no presentation metadata, so the inert default content type is used
+     (a cosmetic filename extension can still drive the response MIME).
 5. Resolve the MIME type from the `*filename` extension via `mime_guess`,
-   falling back to the database `content_type`.
+   falling back to the stored `content_type`.
 6. Render the content with the query variables through `renderer.rs`.
-7. Return `200 OK` with a `Cache-Control` header derived from `cache_mode`
-   (`0` = mutable/short TTL, `1` = immutable/edge-cached).
+7. Return `200 OK` with a `Cache-Control` header derived from **how the id
+   resolved**: a live route → short TTL, `must-revalidate`; a content-addressed
+   version → long-lived `immutable`.
 
 ## Cache constraints
 
@@ -40,7 +54,8 @@ telemetry or analytics state — it is intentionally stateless beyond the cache.
 
 ## Cross-thread invalidation (critical)
 
-A Control Plane `PATCH /api/snippets/{id}` updates the `routes` pointer and MUST
+A Control Plane write — `PATCH /api/snippets/{id}` or
+`POST /api/snippets/{id}/restore` — updates the `routes` pointer and MUST
 **instantly evict `{id}`** from the Data Plane `moka` cache. Use a cross-thread
 message (channel) or the cache's own concurrent eviction API — not a coarse
 shared `Mutex` over the whole cache. The very next Data Plane GET for that `id`
@@ -68,11 +83,12 @@ a **32-byte prefix** and a **16-byte keyed MAC**.
   secret — the Control Plane mints ids, the Data Plane verifies them.
 - `IdSigner::content_id(content) -> String`: `prefix = BLAKE3(content)`, then
   `prefix || MAC(prefix)`. This single value is both the
-  `content_blocks.hash_id` and the `routes.id` of an immutable permalink, so
-  identical text always yields the identical permalink URL under a fixed secret,
-  regardless of requested extension or MIME type (acceptance criterion #3).
-- `IdSigner::random_id() -> String`: `prefix =` 32 CSPRNG bytes, for a mutable
-  alias.
+  `content_blocks.hash_id` and a valid `routes`-shaped id, so identical text
+  always yields the identical content address under a fixed secret, regardless
+  of requested extension or MIME type. The Data Plane serves it directly as an
+  immutable version pointer (acceptance criterion #3).
+- `IdSigner::random_id() -> String`: `prefix =` 32 CSPRNG bytes, for a new
+  editable snippet route.
 - `IdSigner::verify(id) -> bool`: recomputes the MAC over the prefix and
   compares in constant time. The Data Plane calls this before any cache/DB
   lookup; a `false` result is a `404`.

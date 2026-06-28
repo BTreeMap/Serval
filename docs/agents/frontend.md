@@ -25,7 +25,8 @@ npm run lint    # must pass for the quality gate
   through the shared API client module under `frontend/src/`, so auth headers,
   base URL, and error handling stay consistent.
 - **The dashboard manages snippets only.** It talks to `/api/snippets`
-  (create/update); it never talks to the Data Plane. Keep delivery stateless.
+  (create/update/restore); it never talks to the Data Plane. Keep delivery
+  stateless.
 - **No telemetry/analytics.** The system deliberately omits custom analytics and
   relies on edge network logs. Do not add client-side tracking.
 - Let the linter and formatter enforce style — mirror the surrounding code
@@ -34,8 +35,21 @@ npm run lint    # must pass for the quality gate
 ## Control Plane endpoints the UI uses
 
 - `POST /api/snippets` — create. Computes `data_hash`, inserts the block
-  (`ON CONFLICT DO NOTHING`), generates the `route_id` (CSPRNG alias or hash
-  permalink), and writes version 1 to `pointer_history`.
+  (`ON CONFLICT DO NOTHING`), generates a CSPRNG `route_id`, and writes version 1
+  to `pointer_history`. **Every snippet is editable** — there is no immutable
+  snippet kind in the UI.
 - `PATCH /api/snippets/{id}` — update. Inserts the new block, repoints the
   route, appends to `pointer_history`, and triggers Data Plane cache eviction
   for `{id}`.
+- `GET /api/snippets/{id}` — detail, including the full version `history`.
+- `GET /api/snippets/{id}/versions/{hash}` — fetch the content of one past
+  version (used to preview a history entry before restoring).
+- `POST /api/snippets/{id}/restore` — repoint the snippet to an earlier
+  version's `target_hash`; appends a new `pointer_history` row and evicts the
+  cache.
+
+The editor is always shown — the detail view lets the user edit the current
+content and view or restore any entry in the version history. Internally a
+version's `target_hash` is a content address that the Data Plane can serve
+directly, but the UI never surfaces it as a separate "permalink" concept; it is
+just a pointer to a specific revision in the edit history.

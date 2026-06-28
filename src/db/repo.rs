@@ -8,7 +8,8 @@
 //!   updated or deleted.
 //! * Creating a route appends version 1 to `pointer_history`; each update
 //!   appends exactly one further row. The ledger is never pruned.
-//! * An immutable permalink's `id` is exactly the content hash.
+//! * Every snippet is an editable route; a content hash is itself a valid id,
+//!   so a specific stored version is addressable directly by its hash.
 
 use sqlx::PgPool;
 
@@ -22,7 +23,6 @@ pub struct CreateRoute<'a> {
     pub hash: ContentHash,
     pub content: &'a str,
     pub content_type: &'a str,
-    pub cache_mode: CacheMode,
     pub owner_id: Option<&'a str>,
     pub editor_id: &'a str,
 }
@@ -60,15 +60,14 @@ impl Repository {
 
         let inserted = sqlx::query(
             r"
-            INSERT INTO routes (id, target_hash, content_type, cache_mode, owner_id)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO routes (id, target_hash, content_type, owner_id)
+            VALUES ($1, $2, $3, $4)
             ON CONFLICT (id) DO NOTHING
             ",
         )
         .bind(params.id.as_str())
         .bind(params.hash.as_str())
         .bind(params.content_type)
-        .bind(params.cache_mode.as_i16())
         .bind(params.owner_id)
         .execute(&mut *tx)
         .await?
@@ -127,15 +126,16 @@ impl Repository {
         Ok(true)
     }
 
-    /// The Data Plane read path: resolve a route to its current content and
-    /// presentation metadata via the index join.
+    /// The Data Plane read path: resolve a live route to its current content
+    /// and presentation metadata via the index join. A live route is always
+    /// cached as [`CacheMode::Mutable`] — it may be repointed by its owner.
     pub async fn fetch_delivery(
         &self,
         id: &RouteId,
     ) -> Result<Option<DeliveryRecord>, sqlx::Error> {
-        let row = sqlx::query_as::<_, (String, String, i16)>(
+        let row = sqlx::query_as::<_, (String, String)>(
             r"
-            SELECT c.content, r.content_type, r.cache_mode
+            SELECT c.content, r.content_type
             FROM routes r
             INNER JOIN content_blocks c ON c.hash_id = r.target_hash
             WHERE r.id = $1
@@ -145,12 +145,33 @@ impl Repository {
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(row.map(|(content, content_type, mode)| DeliveryRecord {
+        Ok(row.map(|(content, content_type)| DeliveryRecord {
             content,
             content_type,
-            // A value outside {0,1} means the database was corrupted out of
-            // band; default to the safe (mutable) policy rather than failing.
-            cache_mode: CacheMode::from_i16(mode).unwrap_or(CacheMode::Mutable),
+            cache_mode: CacheMode::Mutable,
+        }))
+    }
+
+    /// The content-addressed delivery fallback: resolve an id directly to the
+    /// immutable stored block it names, independent of any route. This is the
+    /// internal "version permalink" path — a content hash addresses exactly one
+    /// version, so it is served as [`CacheMode::Immutable`]. The block carries
+    /// no presentation metadata, so the inert default content type is used
+    /// (a cosmetic filename extension can still drive the response MIME).
+    pub async fn fetch_content_block(
+        &self,
+        hash: &ContentHash,
+    ) -> Result<Option<DeliveryRecord>, sqlx::Error> {
+        let row =
+            sqlx::query_as::<_, (String,)>("SELECT content FROM content_blocks WHERE hash_id = $1")
+                .bind(hash.as_str())
+                .fetch_optional(&self.pool)
+                .await?;
+
+        Ok(row.map(|(content,)| DeliveryRecord {
+            content,
+            content_type: "text/plain; charset=utf-8".to_owned(),
+            cache_mode: CacheMode::Immutable,
         }))
     }
 
@@ -257,21 +278,18 @@ impl Repository {
     /// Fetch routing-layer metadata for a route (no content). Returns `None`
     /// when the route does not exist.
     pub async fn fetch_route_meta(&self, id: &RouteId) -> Result<Option<RouteMeta>, sqlx::Error> {
-        let row = sqlx::query_as::<_, (String, String, i16, Option<String>)>(
-            "SELECT target_hash, content_type, cache_mode, owner_id FROM routes WHERE id = $1",
+        let row = sqlx::query_as::<_, (String, String, Option<String>)>(
+            "SELECT target_hash, content_type, owner_id FROM routes WHERE id = $1",
         )
         .bind(id.as_str())
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(
-            row.map(|(target_hash, content_type, mode, owner_id)| RouteMeta {
-                target_hash,
-                content_type,
-                cache_mode: CacheMode::from_i16(mode).unwrap_or(CacheMode::Mutable),
-                owner_id,
-            }),
-        )
+        Ok(row.map(|(target_hash, content_type, owner_id)| RouteMeta {
+            target_hash,
+            content_type,
+            owner_id,
+        }))
     }
 
     /// List a user's routes, most recently changed first. The "last changed"
@@ -287,7 +305,6 @@ impl Repository {
             (
                 String,
                 String,
-                i16,
                 Option<String>,
                 chrono::DateTime<chrono::Utc>,
             ),
@@ -295,13 +312,12 @@ impl Repository {
             r"
             SELECT r.id,
                    r.content_type,
-                   r.cache_mode,
                    r.owner_id,
                    COALESCE(MAX(h.changed_at), NOW()) AS updated_at
             FROM routes r
             LEFT JOIN pointer_history h ON h.route_id = r.id
             WHERE r.owner_id = $1
-            GROUP BY r.id, r.content_type, r.cache_mode, r.owner_id
+            GROUP BY r.id, r.content_type, r.owner_id
             ORDER BY updated_at DESC
             ",
         )
@@ -311,15 +327,12 @@ impl Repository {
 
         Ok(rows
             .into_iter()
-            .map(
-                |(id, content_type, mode, owner_id, updated_at)| RouteSummary {
-                    id,
-                    content_type,
-                    cache_mode: CacheMode::from_i16(mode).unwrap_or(CacheMode::Mutable),
-                    owner_id,
-                    updated_at,
-                },
-            )
+            .map(|(id, content_type, owner_id, updated_at)| RouteSummary {
+                id,
+                content_type,
+                owner_id,
+                updated_at,
+            })
             .collect())
     }
 
@@ -345,6 +358,83 @@ impl Repository {
                 changed_at,
             })
             .collect())
+    }
+
+    /// Fetch the content of one historical version of a route, identified by
+    /// the version's content hash. Returns `None` unless that hash is a genuine
+    /// version of *this* route, so a caller can never read arbitrary content
+    /// through another route's id.
+    pub async fn fetch_version_content(
+        &self,
+        id: &RouteId,
+        hash: &ContentHash,
+    ) -> Result<Option<String>, sqlx::Error> {
+        let row = sqlx::query_as::<_, (String,)>(
+            r"
+            SELECT c.content
+            FROM content_blocks c
+            WHERE c.hash_id = $2
+              AND EXISTS (
+                  SELECT 1 FROM pointer_history h
+                  WHERE h.route_id = $1 AND h.target_hash = $2
+              )
+            ",
+        )
+        .bind(id.as_str())
+        .bind(hash.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|(content,)| content))
+    }
+
+    /// Repoint a route at one of its own historical versions, appending the
+    /// restore to the ledger as a new version. Returns `Ok(false)` when `hash`
+    /// is not a known version of this route (or the route does not exist); the
+    /// content block is already stored, so none is inserted.
+    pub async fn restore_version(
+        &self,
+        id: &RouteId,
+        hash: &ContentHash,
+        editor_id: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+
+        // The target must be a genuine prior version of this exact route.
+        let (is_version,) = sqlx::query_as::<_, (bool,)>(
+            r"
+            SELECT EXISTS (
+                SELECT 1 FROM pointer_history
+                WHERE route_id = $1 AND target_hash = $2
+            )
+            ",
+        )
+        .bind(id.as_str())
+        .bind(hash.as_str())
+        .fetch_one(&mut *tx)
+        .await?;
+
+        if !is_version {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+
+        let updated = sqlx::query("UPDATE routes SET target_hash = $2 WHERE id = $1")
+            .bind(id.as_str())
+            .bind(hash.as_str())
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+
+        if updated == 0 {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+
+        self.append_history(&mut tx, id, hash, editor_id).await?;
+
+        tx.commit().await?;
+        Ok(true)
     }
 
     /// Append one row to the append-only ledger within the caller's transaction.

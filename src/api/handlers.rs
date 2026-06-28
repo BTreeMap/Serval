@@ -1,9 +1,10 @@
-//! Control Plane snippet handlers: create, update, and inspect routes.
+//! Control Plane snippet handlers: create, update, inspect, and restore routes.
 //!
-//! Writes uphold the system invariants at the boundary: permalinks are derived
-//! purely from content and are immutable, mutable aliases may be repointed only
-//! by their owner (or an admin), and **every** write evicts the affected id
-//! from the shared delivery cache so the next Data Plane read is fresh.
+//! Writes uphold the system invariants at the boundary: content blocks are
+//! immutable and content-addressed, every snippet is an editable route that may
+//! be repointed only by its owner (or an admin), and **every** write evicts the
+//! affected id from the shared delivery cache so the next Data Plane read is
+//! fresh.
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -13,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use super::error::ApiError;
 use super::extract::Caller;
 use crate::db::CreateRoute;
-use crate::db::models::{CacheMode, ContentHash, RouteId};
+use crate::db::models::{ContentHash, RouteId};
 use crate::state::ControlState;
 
 const DEFAULT_CONTENT_TYPE: &str = "text/plain; charset=utf-8";
@@ -27,23 +28,25 @@ pub struct CreateRequest {
     /// Optional MIME type; defaults to `text/plain; charset=utf-8`.
     #[serde(default)]
     pub content_type: Option<String>,
-    /// When `true`, mint an immutable permalink (id = content hash) instead of
-    /// a mutable alias.
-    #[serde(default)]
-    pub immutable: bool,
 }
 
-/// Request body for updating a mutable snippet.
+/// Request body for updating a snippet.
 #[derive(Debug, Deserialize)]
 pub struct UpdateRequest {
     pub content: String,
+}
+
+/// Request body for restoring a snippet to one of its earlier versions.
+#[derive(Debug, Deserialize)]
+pub struct RestoreRequest {
+    /// The content hash of the version to restore, taken from the ledger.
+    pub target_hash: String,
 }
 
 /// Representation of a route returned to the dashboard.
 #[derive(Debug, Serialize)]
 pub struct SnippetResponse {
     pub id: String,
-    pub immutable: bool,
     pub content_type: String,
     pub owner_id: Option<String>,
 }
@@ -51,7 +54,6 @@ pub struct SnippetResponse {
 #[derive(Debug, Serialize)]
 pub struct SnippetSummary {
     pub id: String,
-    pub immutable: bool,
     pub content_type: String,
     pub owner_id: Option<String>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
@@ -68,11 +70,17 @@ pub struct HistoryItem {
 #[derive(Debug, Serialize)]
 pub struct SnippetDetail {
     pub id: String,
-    pub immutable: bool,
     pub content_type: String,
     pub owner_id: Option<String>,
     pub history_count: usize,
     pub history: Vec<HistoryItem>,
+}
+
+/// The content of one historical version, returned for previewing.
+#[derive(Debug, Serialize)]
+pub struct VersionContent {
+    pub target_hash: String,
+    pub content: String,
 }
 
 /// The current caller's identity and role, for the UI.
@@ -116,7 +124,6 @@ pub async fn list_snippets(
         .into_iter()
         .map(|r| SnippetSummary {
             id: r.id,
-            immutable: r.cache_mode == CacheMode::Immutable,
             content_type: r.content_type,
             owner_id: r.owner_id,
             updated_at: r.updated_at,
@@ -125,7 +132,7 @@ pub async fn list_snippets(
     Ok(Json(snippets))
 }
 
-/// `POST /api/snippets` — create a mutable alias or immutable permalink.
+/// `POST /api/snippets` — create a new editable snippet.
 pub async fn create_snippet(
     State(state): State<ControlState>,
     caller: Caller,
@@ -133,20 +140,11 @@ pub async fn create_snippet(
 ) -> Result<(StatusCode, Json<SnippetResponse>), ApiError> {
     let content_type = normalize_content_type(req.content_type)?;
 
-    // Mint the signed content id once: it is the content-block key and, for an
-    // immutable permalink, the route id itself (one unified id format).
+    // Mint the signed content id (the content-block key) and an unguessable,
+    // random route id. The route is the user-facing, editable handle; the
+    // content hash is an internal address for this exact version.
     let hash = ContentHash::from_signed(state.signer.content_id(&req.content));
-    let (id, cache_mode) = if req.immutable {
-        (
-            RouteId::from_signed(hash.as_str().to_owned()),
-            CacheMode::Immutable,
-        )
-    } else {
-        (
-            RouteId::from_signed(state.signer.random_id()),
-            CacheMode::Mutable,
-        )
-    };
+    let id = RouteId::from_signed(state.signer.random_id());
 
     let inserted = state
         .repo
@@ -155,13 +153,12 @@ pub async fn create_snippet(
             hash: hash.clone(),
             content: &req.content,
             content_type: &content_type,
-            cache_mode,
             owner_id: Some(&caller.user_id),
             editor_id: &caller.user_id,
         })
         .await?;
 
-    if !inserted && !req.immutable {
+    if !inserted {
         // A random alias collided with an existing id — vanishingly unlikely.
         // Surface it so the client can simply retry.
         return Err(ApiError::Conflict(
@@ -169,30 +166,23 @@ pub async fn create_snippet(
         ));
     }
 
-    // Evict any stale cache entry (e.g. an identical permalink re-created after
-    // an eviction) so the next delivery read reflects current state.
+    // Evict any stale cache entry so the next delivery read reflects current
+    // state.
     state.cache.invalidate(&id).await;
 
     let owner_id = Some(caller.user_id);
-    let status = if inserted {
-        StatusCode::CREATED
-    } else {
-        // Idempotent permalink re-creation: the content already had this id.
-        StatusCode::OK
-    };
 
     Ok((
-        status,
+        StatusCode::CREATED,
         Json(SnippetResponse {
             id: id.into_inner(),
-            immutable: req.immutable,
             content_type,
             owner_id,
         }),
     ))
 }
 
-/// `PATCH /api/snippets/{id}` — repoint a mutable alias at new content.
+/// `PATCH /api/snippets/{id}` — repoint a snippet at new content.
 pub async fn update_snippet(
     State(state): State<ControlState>,
     caller: Caller,
@@ -208,12 +198,6 @@ pub async fn update_snippet(
         .ok_or(ApiError::NotFound)?;
 
     authorize_write(&caller, meta.owner_id.as_deref())?;
-
-    if meta.cache_mode == CacheMode::Immutable {
-        return Err(ApiError::Conflict(
-            "immutable permalinks cannot be updated".to_owned(),
-        ));
-    }
 
     let updated = state
         .repo
@@ -233,7 +217,6 @@ pub async fn update_snippet(
 
     Ok(Json(SnippetResponse {
         id: id.into_inner(),
-        immutable: false,
         content_type: meta.content_type,
         owner_id: meta.owner_id,
     }))
@@ -268,11 +251,81 @@ pub async fn get_snippet(
 
     Ok(Json(SnippetDetail {
         id: id.into_inner(),
-        immutable: meta.cache_mode == CacheMode::Immutable,
         content_type: meta.content_type,
         owner_id: meta.owner_id,
         history_count,
         history,
+    }))
+}
+
+/// `GET /api/snippets/{id}/versions/{hash}` — return the content of one
+/// historical version of a snippet for previewing. The hash must be a genuine
+/// version of this route, so a caller cannot read arbitrary content.
+pub async fn get_version(
+    State(state): State<ControlState>,
+    caller: Caller,
+    Path((raw_id, raw_hash)): Path<(String, String)>,
+) -> Result<Json<VersionContent>, ApiError> {
+    let id = RouteId::parse(&raw_id).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    let hash = ContentHash::parse(&raw_hash).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+
+    let meta = state
+        .repo
+        .fetch_route_meta(&id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+
+    authorize_write(&caller, meta.owner_id.as_deref())?;
+
+    let content = state
+        .repo
+        .fetch_version_content(&id, &hash)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+
+    Ok(Json(VersionContent {
+        target_hash: hash.into_inner(),
+        content,
+    }))
+}
+
+/// `POST /api/snippets/{id}/restore` — repoint a snippet at one of its earlier
+/// versions, recording the restore as a new entry in the ledger.
+pub async fn restore_snippet(
+    State(state): State<ControlState>,
+    caller: Caller,
+    Path(raw_id): Path<String>,
+    Json(req): Json<RestoreRequest>,
+) -> Result<Json<SnippetResponse>, ApiError> {
+    let id = RouteId::parse(&raw_id).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    let hash =
+        ContentHash::parse(&req.target_hash).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+
+    let meta = state
+        .repo
+        .fetch_route_meta(&id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+
+    authorize_write(&caller, meta.owner_id.as_deref())?;
+
+    let restored = state
+        .repo
+        .restore_version(&id, &hash, &caller.user_id)
+        .await?;
+    if !restored {
+        return Err(ApiError::BadRequest(
+            "target_hash is not a version of this snippet".to_owned(),
+        ));
+    }
+
+    // Cross-thread invalidation: the next Data Plane GET must see new content.
+    state.cache.invalidate(&id).await;
+
+    Ok(Json(SnippetResponse {
+        id: id.into_inner(),
+        content_type: meta.content_type,
+        owner_id: meta.owner_id,
     }))
 }
 

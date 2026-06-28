@@ -7,7 +7,7 @@
 //!
 //! The three tables encode the CAS model:
 //! * `content_blocks` — immutable, content-addressed payloads (write-once).
-//! * `routes` — the active alias/permalink pointers and their metadata.
+//! * `routes` — the active, editable snippet pointers and their metadata.
 //! * `pointer_history` — the infinite, append-only audit ledger.
 //!
 //! A fourth, additive `users` table tracks authenticated identities and the
@@ -30,14 +30,14 @@ pub async fn apply(pool: &PgPool) -> Result<(), sqlx::Error> {
     .execute(pool)
     .await?;
 
-    // Active routing layer. id is an alias (random) or a permalink (= hash).
+    // Active routing layer. Each row is an editable snippet addressed by an
+    // unguessable, signed id and pointing at its current content block.
     sqlx::query(
         r"
         CREATE TABLE IF NOT EXISTS routes (
             id VARCHAR(64) PRIMARY KEY,
             target_hash VARCHAR(64) NOT NULL REFERENCES content_blocks (hash_id),
             content_type VARCHAR(255) NOT NULL DEFAULT 'text/plain; charset=utf-8',
-            cache_mode SMALLINT NOT NULL,
             owner_id VARCHAR(255)
         )
         ",

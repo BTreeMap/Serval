@@ -34,8 +34,8 @@ Full test / E2E / Dockerized PostgreSQL commands →
 ## Boundaries & Constraints
 
 - **Never prune `pointer_history`.** It is an infinite, append-only audit
-  ledger. Every alias update appends one row; no pruning, truncation, or
-  retention cap is ever applied. → [docs/agents/database.md](docs/agents/database.md).
+  ledger. Every update appends one row; no pruning, truncation, or retention cap
+  is ever applied. → [docs/agents/database.md](docs/agents/database.md).
 - **Never break the database to refactor code.** You may rewrite/rename/delete
   Rust interfaces freely, but every schema-affecting change MUST ship a correct,
   idempotent, data-preserving PostgreSQL migration. Data integrity is the one
@@ -51,9 +51,9 @@ Full test / E2E / Dockerized PostgreSQL commands →
   check (`IdSigner::verify`) before any cache or database lookup; a failed check
   is a `404`. This stateless gate is the DoS mitigation — do not bypass it or
   move it after the cache. → [docs/agents/delivery.md](docs/agents/delivery.md).
-- **Always evict the `moka` cache on writes.** A Control Plane `PATCH` MUST
-  invalidate the affected `id` in the Data Plane cache so the next GET reflects
-  the change. → [docs/agents/delivery.md](docs/agents/delivery.md).
+- **Always evict the `moka` cache on writes.** A Control Plane write (`PATCH` or
+  restore) MUST invalidate the affected `id` in the Data Plane cache so the next
+  GET reflects the change. → [docs/agents/delivery.md](docs/agents/delivery.md).
 - **Don't bypass the storage layer.** Persistence goes through the shared pool;
   don't open ad-hoc DB connections inside handlers.
 - **Frontend: don't call `fetch`/`axios` directly.** Use the shared API client

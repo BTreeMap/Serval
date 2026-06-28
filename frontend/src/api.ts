@@ -5,7 +5,6 @@
 /** A snippet route as returned by create/update. */
 export interface SnippetResponse {
     id: string;
-    immutable: boolean;
     content_type: string;
     owner_id: string | null;
 }
@@ -17,10 +16,15 @@ export interface HistoryItem {
     changed_at: string;
 }
 
+/** The content of one historical version, fetched for previewing. */
+export interface VersionContent {
+    target_hash: string;
+    content: string;
+}
+
 /** A route plus its full version history. */
 export interface SnippetDetail {
     id: string;
-    immutable: boolean;
     content_type: string;
     owner_id: string | null;
     history_count: number;
@@ -30,7 +34,6 @@ export interface SnippetDetail {
 /** A compact route listing entry for the dashboard index. */
 export interface SnippetSummary {
     id: string;
-    immutable: boolean;
     content_type: string;
     owner_id: string | null;
     updated_at: string;
@@ -55,7 +58,6 @@ export interface AuthInfo {
 export interface CreateRequest {
     content: string;
     content_type?: string;
-    immutable: boolean;
 }
 
 /** A typed error carrying the HTTP status for caller-side branching. */
@@ -149,6 +151,22 @@ export const api = {
             method: "PATCH",
             json: { content },
         });
+    },
+
+    getVersion(id: string, hash: string): Promise<VersionContent> {
+        return request<VersionContent>(
+            `/api/snippets/${encodeURIComponent(id)}/versions/${encodeURIComponent(hash)}`,
+        );
+    },
+
+    restoreVersion(id: string, hash: string): Promise<SnippetResponse> {
+        return request<SnippetResponse>(
+            `/api/snippets/${encodeURIComponent(id)}/restore`,
+            {
+                method: "POST",
+                json: { target_hash: hash },
+            },
+        );
     },
 };
 

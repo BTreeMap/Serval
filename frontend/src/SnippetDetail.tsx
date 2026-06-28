@@ -9,8 +9,8 @@ import {
 } from "./api";
 import { Badge, Button, Card, CopyButton, ErrorBanner } from "./ui";
 
-/** Detail view for one snippet: metadata, an editor for mutable routes, and the
- *  append-only version ledger. */
+/** Detail view for one snippet: metadata, an editor, and the append-only
+ *  version ledger with per-version preview and restore. */
 export function SnippetDetail() {
   const { id = "" } = useParams<{ id: string }>();
   const [detail, setDetail] = useState<Detail | null>(null);
@@ -59,9 +59,6 @@ export function SnippetDetail() {
           <code className="truncate font-mono text-sm text-wisteria-deep">
             {detail.id}
           </code>
-          <Badge tone={detail.immutable ? "cream" : "wisteria"}>
-            {detail.immutable ? "immutable" : "mutable"}
-          </Badge>
         </div>
         <div className="flex items-center gap-2 text-xs text-ink-soft">
           <span>{detail.content_type}</span>
@@ -76,21 +73,18 @@ export function SnippetDetail() {
         </div>
       </Card>
 
-      {detail.immutable ? (
-        <p className="text-sm text-ink-soft">
-          Immutable permalinks are content-addressed and cannot be edited.
-          Create a new snippet to publish different content.
-        </p>
-      ) : (
-        <Editor id={detail.id} onUpdated={() => void refresh()} />
-      )}
+      <Editor id={detail.id} onUpdated={() => void refresh()} />
 
-      <HistoryList history={detail.history} />
+      <HistoryList
+        id={detail.id}
+        history={detail.history}
+        onRestored={() => void refresh()}
+      />
     </div>
   );
 }
 
-/** An inline editor that repoints a mutable alias at new content. */
+/** An inline editor that repoints a snippet at new content. */
 function Editor({ id, onUpdated }: { id: string; onUpdated: () => void }) {
   const [content, setContent] = useState("");
   const [busy, setBusy] = useState(false);
@@ -134,28 +128,99 @@ function Editor({ id, onUpdated }: { id: string; onUpdated: () => void }) {
   );
 }
 
-/** The version ledger, newest first. */
-function HistoryList({ history }: { history: HistoryItem[] }) {
+/** The version ledger, newest first. Each entry can be previewed and restored;
+ *  restoring repoints the snippet and appends a new version. */
+function HistoryList({
+  id,
+  history,
+  onRestored,
+}: {
+  id: string;
+  history: HistoryItem[];
+  onRestored: () => void;
+}) {
+  const [preview, setPreview] = useState<{ hash: string; content: string } | null>(
+    null,
+  );
+  const [busyHash, setBusyHash] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const view = async (hash: string) => {
+    setError(null);
+    if (preview?.hash === hash) {
+      setPreview(null);
+      return;
+    }
+    try {
+      const version = await api.getVersion(id, hash);
+      setPreview({ hash, content: version.content });
+    } catch (err) {
+      setError(messageOf(err));
+    }
+  };
+
+  const restore = async (hash: string) => {
+    setError(null);
+    setBusyHash(hash);
+    try {
+      await api.restoreVersion(id, hash);
+      setPreview(null);
+      onRestored();
+    } catch (err) {
+      setError(messageOf(err));
+    } finally {
+      setBusyHash(null);
+    }
+  };
+
   return (
     <section className="space-y-3">
       <h2 className="text-lg font-semibold">Version history</h2>
+      {error && <ErrorBanner message={error} />}
       <ol className="space-y-2">
-        {history.map((entry, index) => (
-          <li
-            key={`${entry.changed_at}-${entry.target_hash}`}
-            className="flex items-center justify-between gap-4 rounded-lg border border-line bg-surface px-4 py-3"
-          >
-            <div className="min-w-0">
-              <code className="block truncate font-mono text-xs text-ink-soft">
-                {entry.target_hash}
-              </code>
-              <span className="text-xs text-ink-faint">
-                by {entry.editor_id} · {formatDate(entry.changed_at)}
-              </span>
-            </div>
-            <Badge>v{history.length - index}</Badge>
-          </li>
-        ))}
+        {history.map((entry, index) => {
+          const isCurrent = index === 0;
+          const isOpen = preview?.hash === entry.target_hash;
+          return (
+            <li
+              key={`${entry.changed_at}-${entry.target_hash}`}
+              className="space-y-3 rounded-lg border border-line bg-surface px-4 py-3"
+            >
+              <div className="flex items-center justify-between gap-4">
+                <div className="min-w-0">
+                  <code className="block truncate font-mono text-xs text-ink-soft">
+                    {entry.target_hash}
+                  </code>
+                  <span className="text-xs text-ink-faint">
+                    by {entry.editor_id} · {formatDate(entry.changed_at)}
+                  </span>
+                </div>
+                <div className="flex shrink-0 items-center gap-2">
+                  <Badge tone={isCurrent ? "wisteria" : "neutral"}>
+                    {isCurrent ? "current" : `v${history.length - index}`}
+                  </Badge>
+                  <Button variant="ghost" onClick={() => void view(entry.target_hash)}>
+                    {isOpen ? "Hide" : "View"}
+                  </Button>
+                  {!isCurrent && (
+                    <Button
+                      variant="secondary"
+                      disabled={busyHash === entry.target_hash}
+                      onClick={() => void restore(entry.target_hash)}
+                    >
+                      {busyHash === entry.target_hash ? "Restoring…" : "Restore"}
+                    </Button>
+                  )}
+                </div>
+              </div>
+              {isOpen && (
+                <pre className="overflow-x-auto rounded bg-canvas px-3 py-2 font-mono text-xs text-ink">
+                  {preview.content}
+                </pre>
+              )}
+            </li>
+          );
+        })}
       </ol>
     </section>
   );

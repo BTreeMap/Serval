@@ -6,7 +6,7 @@ mod handlers;
 mod static_files;
 
 use axum::Router;
-use axum::routing::get;
+use axum::routing::{get, post};
 use tower_http::cors::CorsLayer;
 
 pub use error::ApiError;
@@ -31,6 +31,14 @@ pub fn router(state: ControlState) -> Router {
         .route(
             "/api/snippets/{id}",
             get(handlers::get_snippet).patch(handlers::update_snippet),
+        )
+        .route(
+            "/api/snippets/{id}/versions/{hash}",
+            get(handlers::get_version),
+        )
+        .route(
+            "/api/snippets/{id}/restore",
+            post(handlers::restore_snippet),
         )
         .fallback(static_files::serve)
         .layer(cors)

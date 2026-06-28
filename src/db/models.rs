@@ -11,7 +11,12 @@
 
 use crate::crypto::ID_LEN;
 
-/// A validated 64-character route id (mutable alias or immutable permalink).
+/// A validated 64-character route id.
+///
+/// Every snippet is an editable route addressed by an unguessable, signed id.
+/// A content hash shares this exact format (it is itself a valid, signed id),
+/// so the Data Plane can address a specific stored version directly — but that
+/// is an internal delivery detail, never a separate user-facing kind of route.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RouteId(String);
 
@@ -72,12 +77,36 @@ impl std::fmt::Display for RouteId {
 /// encoded to exactly [`ID_LEN`] characters.
 ///
 /// This is the immutable `content_blocks.hash_id` — the CAS dedup key — and it
-/// shares the one id format: it is itself a valid, MAC-signed route id (the id
-/// of the corresponding immutable permalink). Minted by [`crypto::IdSigner`].
+/// shares the one id format: it is itself a valid, MAC-signed route id. The
+/// Data Plane uses that property to serve a specific stored version directly by
+/// its hash (an internal "version permalink"). Minted by [`crypto::IdSigner`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ContentHash(String);
 
+/// Error returned when a candidate content hash fails validation.
+#[derive(Debug, thiserror::Error)]
+pub enum ContentHashError {
+    #[error("content hash must be {ID_LEN} characters, got {0}")]
+    WrongLength(usize),
+    #[error("content hash contains a non URL-safe-Base64 character")]
+    InvalidCharacter,
+}
+
 impl ContentHash {
+    /// Parse and validate an untrusted content hash (e.g. from a request path).
+    pub fn parse(raw: &str) -> Result<Self, ContentHashError> {
+        if raw.len() != ID_LEN {
+            return Err(ContentHashError::WrongLength(raw.len()));
+        }
+        if !raw
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            return Err(ContentHashError::InvalidCharacter);
+        }
+        Ok(Self(raw.to_owned()))
+    }
+
     /// Adopt a freshly-minted content id from [`crypto::IdSigner::content_id`].
     ///
     /// The signer guarantees a valid 64-char id, so this skips re-validation.
@@ -106,42 +135,23 @@ impl std::fmt::Display for ContentHash {
     }
 }
 
-/// Caching policy for a route, stored as a `SMALLINT` in `routes.cache_mode`.
+/// Edge-caching policy for a delivery response. Derived at delivery time from
+/// *how* the id resolved — it is not stored.
+///
+/// A live route can be repointed by its owner, so it is cached briefly behind
+/// explicit invalidation. A content-hash id addresses one immutable stored
+/// version, so it is safe to cache forever.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CacheMode {
-    /// `0` — mutable alias: short TTL, must be evicted on update.
+    /// A live route: short TTL, evicted on update.
     Mutable,
-    /// `1` — immutable permalink: safe for long-lived edge caching.
+    /// A content-addressed version: safe for long-lived edge caching.
     Immutable,
 }
 
-/// Error returned when an out-of-range integer is read for a [`CacheMode`].
-#[derive(Debug, thiserror::Error)]
-#[error("invalid cache_mode value: {0}")]
-pub struct CacheModeError(i16);
-
-impl CacheMode {
-    /// The on-disk `SMALLINT` representation.
-    #[must_use]
-    pub fn as_i16(self) -> i16 {
-        match self {
-            CacheMode::Mutable => 0,
-            CacheMode::Immutable => 1,
-        }
-    }
-
-    /// Parse the `SMALLINT` representation read back from PostgreSQL.
-    pub fn from_i16(value: i16) -> Result<Self, CacheModeError> {
-        match value {
-            0 => Ok(CacheMode::Mutable),
-            1 => Ok(CacheMode::Immutable),
-            other => Err(CacheModeError(other)),
-        }
-    }
-}
-
-/// The columns needed to serve a delivery request, produced by the index join
-/// of `routes` against `content_blocks`.
+/// The columns needed to serve a delivery request. The `cache_mode` is set by
+/// the resolution path (live route vs. direct content-hash), not read from a
+/// column.
 #[derive(Debug, Clone)]
 pub struct DeliveryRecord {
     pub content: String,
@@ -150,12 +160,11 @@ pub struct DeliveryRecord {
 }
 
 /// Routing-layer metadata for a single route, without its content. Used by the
-/// Control Plane to enforce ownership and mutability before a write.
+/// Control Plane to enforce ownership before a write.
 #[derive(Debug, Clone)]
 pub struct RouteMeta {
     pub target_hash: String,
     pub content_type: String,
-    pub cache_mode: CacheMode,
     pub owner_id: Option<String>,
 }
 
@@ -173,7 +182,6 @@ pub struct HistoryEntry {
 pub struct RouteSummary {
     pub id: String,
     pub content_type: String,
-    pub cache_mode: CacheMode,
     pub owner_id: Option<String>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -232,7 +240,7 @@ mod tests {
     #[test]
     fn from_signed_adopts_minted_id() {
         let signer = crypto::IdSigner::new("test-secret");
-        let signed = signer.content_id("permalink content");
+        let signed = signer.content_id("some content");
         let id = RouteId::from_signed(signed.clone());
         assert_eq!(id.as_str(), signed);
     }
@@ -240,29 +248,34 @@ mod tests {
     #[test]
     fn content_hash_is_64_chars() {
         let signer = crypto::IdSigner::new("test-secret");
-        let hash = ContentHash::from_signed(signer.content_id("permalink content"));
+        let hash = ContentHash::from_signed(signer.content_id("some content"));
         assert_eq!(hash.as_str().len(), ID_LEN);
     }
 
     #[test]
-    fn permalink_id_equals_content_hash() {
-        // Unified format: an immutable permalink's route id IS its content hash.
+    fn content_hash_parses_a_signed_id() {
         let signer = crypto::IdSigner::new("test-secret");
-        let content_id = signer.content_id("permalink content");
+        let signed = signer.content_id("some content");
+        let hash = ContentHash::parse(&signed).expect("signed content id must parse");
+        assert_eq!(hash.as_str(), signed);
+    }
+
+    #[test]
+    fn content_hash_rejects_wrong_length() {
+        assert!(matches!(
+            ContentHash::parse("too-short"),
+            Err(ContentHashError::WrongLength(9))
+        ));
+    }
+
+    #[test]
+    fn content_id_is_a_valid_route_id() {
+        // One id format: a content hash is itself a valid, signed route id, so
+        // the Data Plane can address a stored version directly by its hash.
+        let signer = crypto::IdSigner::new("test-secret");
+        let content_id = signer.content_id("some content");
         let hash = ContentHash::from_signed(content_id.clone());
         let route = RouteId::from_signed(content_id);
         assert_eq!(route.as_str(), hash.as_str());
-    }
-
-    #[test]
-    fn cache_mode_roundtrips() {
-        for mode in [CacheMode::Mutable, CacheMode::Immutable] {
-            assert_eq!(CacheMode::from_i16(mode.as_i16()).unwrap(), mode);
-        }
-    }
-
-    #[test]
-    fn cache_mode_rejects_unknown() {
-        assert!(CacheMode::from_i16(7).is_err());
     }
 }

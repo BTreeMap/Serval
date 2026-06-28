@@ -33,7 +33,7 @@ export function Card({
     );
 }
 
-/** A small status pill, e.g. immutable vs mutable. */
+/** A small status pill, e.g. a version marker. */
 export function Badge({
     tone = "neutral",
     children,

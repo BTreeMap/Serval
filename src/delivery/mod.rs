@@ -1,9 +1,10 @@
 //! The Data Plane: public, extreme-throughput snippet delivery.
 //!
 //! The hot path is GET-only and deliberately minimal: validate the id, read
-//! through the byte-bounded cache (loading via the index join on a miss),
-//! render the template against the query string, and return the bytes with a
-//! cache policy derived from the route's mutability.
+//! through the byte-bounded cache (loading via the index join on a miss, or the
+//! content-addressed fallback when no live route owns the id), render the
+//! template against the query string, and return the bytes with a cache policy
+//! derived from how the id resolved.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,7 +17,7 @@ use axum::routing::get;
 use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::cache::CachedSnippet;
-use crate::db::models::{CacheMode, RouteId};
+use crate::db::models::{CacheMode, ContentHash, RouteId};
 use crate::renderer;
 use crate::state::DeliveryState;
 
@@ -101,7 +102,20 @@ async fn deliver(
         .get_or_load(&id, move || async move {
             match repo.fetch_delivery(&load_id).await {
                 Ok(Some(record)) => Ok(CachedSnippet::from(record)),
-                Ok(None) => Err(LoadError::NotFound),
+                Ok(None) => {
+                    // No live route owns this id. Fall back to the content-
+                    // addressed path: the verified id may itself be a content
+                    // hash naming an exact stored version, which we serve
+                    // directly with immutable caching. This is the internal
+                    // "version permalink" — never exposed as a separate kind of
+                    // snippet, just a deterministic address for one version.
+                    let hash = ContentHash::from_signed(load_id.as_str().to_owned());
+                    match repo.fetch_content_block(&hash).await {
+                        Ok(Some(record)) => Ok(CachedSnippet::from(record)),
+                        Ok(None) => Err(LoadError::NotFound),
+                        Err(e) => Err(LoadError::Database(e)),
+                    }
+                }
                 Err(e) => Err(LoadError::Database(e)),
             }
         })
@@ -190,9 +204,10 @@ fn neutralize_html(value: HeaderValue) -> HeaderValue {
     }
 }
 
-/// Choose a `Cache-Control` policy from the route's mutability. Immutable,
-/// content-addressed routes are safe to cache aggressively at the edge; mutable
-/// aliases get a short, revalidated TTL behind the in-process cache.
+/// Choose a `Cache-Control` policy from how the id resolved. A live route may
+/// be repointed by its owner, so it gets a short, revalidated TTL behind the
+/// in-process cache; a content-addressed version names one immutable block and
+/// is safe to cache aggressively at the edge.
 fn cache_control_for(mode: CacheMode) -> HeaderValue {
     match mode {
         CacheMode::Immutable => HeaderValue::from_static("public, max-age=31536000, immutable"),

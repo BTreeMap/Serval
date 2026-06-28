@@ -106,17 +106,17 @@ impl IdSigner {
     /// Mint the content id for `content`: `BLAKE3(content) || MAC`.
     ///
     /// This single value is both the `content_blocks.hash_id` (the CAS dedup
-    /// key) and the route id of an immutable permalink. Identical content always
-    /// yields the identical id under a fixed secret — permalink purity is
-    /// preserved, now bound to the deployment key, and a content address is
-    /// itself a valid route id.
+    /// key) and a valid, signed route id, so the Data Plane can address one
+    /// exact stored version directly by its hash. Identical content always
+    /// yields the identical id under a fixed secret — a deterministic, internal
+    /// version address bound to the deployment key.
     #[must_use]
     pub fn content_id(&self, content: &str) -> String {
         let digest = blake3::hash(content.as_bytes());
         self.assemble(*digest.as_bytes())
     }
 
-    /// Mint a fresh, unguessable snippet id for a mutable alias from 32 CSPRNG
+    /// Mint a fresh, unguessable id for a new editable snippet from 32 CSPRNG
     /// bytes.
     #[must_use]
     pub fn random_id(&self) -> String {

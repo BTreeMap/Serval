@@ -53,16 +53,17 @@ Do not edit these workflows unless explicitly asked. CI checkouts must pass
 Every change must keep all four of these true, verified via the Dockerized
 PostgreSQL integration tests:
 
-1. **Cross-thread invalidation.** Updating a mutable alias via the Control Plane
-   is reflected on the very next Data Plane GET — proving the `moka` cache was
-   evicted.
+1. **Cross-thread invalidation.** Updating a snippet via the Control Plane
+   (`PATCH` or restore) is reflected on the very next Data Plane GET — proving
+   the `moka` cache was evicted.
 2. **Tolerant rendering.** `GET /?port=8080` for a snippet containing `{{uuid}}`
    and `{{port}}` returns the port substituted and the literal `{{uuid}}`
    intact.
-3. **Permalink purity.** Immutable permalink creation yields a 64-char id equal
-   to the signed content id `Base64URL(BLAKE3(content) || keyed-MAC)` —
-   identical text always gives the identical URL under a fixed deployment
-   secret, regardless of extension or MIME type. (The Data Plane also rejects
-   any id whose MAC fails verification with a `404`, before any cache/DB work.)
-4. **Infinite ledger.** Modifying an alias 100 times yields exactly 101
+3. **Content-addressed delivery.** A version's content hash is the signed
+   content id `Base64URL(BLAKE3(content) || keyed-MAC)` — identical text always
+   yields the identical hash under a fixed deployment secret, regardless of
+   extension or MIME type. The Data Plane serves that hash directly as an
+   immutable version (long-lived `Cache-Control: immutable`), while it rejects
+   any id whose MAC fails verification with a `404`, before any cache/DB work.
+4. **Infinite ledger.** Modifying a snippet 100 times yields exactly 101
    `pointer_history` rows, with no pruning.

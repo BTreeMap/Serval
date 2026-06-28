@@ -8,7 +8,7 @@ import {
   type SnippetResponse,
   type SnippetSummary,
 } from "./api";
-import { Badge, Button, Card, CopyButton, ErrorBanner } from "./ui";
+import { Button, Card, CopyButton, ErrorBanner } from "./ui";
 
 /** The landing page: a creation form above the caller's existing snippets. */
 export function Dashboard() {
@@ -72,9 +72,6 @@ function SnippetRow({ snippet }: { snippet: SnippetSummary }) {
             {snippet.id}
           </Link>
           <div className="mt-1 flex items-center gap-2 text-xs text-ink-soft">
-            <Badge tone={snippet.immutable ? "cream" : "wisteria"}>
-              {snippet.immutable ? "immutable" : "mutable"}
-            </Badge>
             <span>{snippet.content_type}</span>
             <span>·</span>
             <span>updated {formatDate(snippet.updated_at)}</span>
@@ -95,7 +92,6 @@ function SnippetRow({ snippet }: { snippet: SnippetSummary }) {
 function CreateForm({ onCreated }: { onCreated: () => void }) {
   const [content, setContent] = useState("");
   const [contentType, setContentType] = useState("");
-  const [immutable, setImmutable] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [created, setCreated] = useState<SnippetResponse | null>(null);
@@ -108,7 +104,7 @@ function CreateForm({ onCreated }: { onCreated: () => void }) {
     setBusy(true);
     setError(null);
     try {
-      const payload: CreateRequest = { content, immutable };
+      const payload: CreateRequest = { content };
       if (contentType.trim()) {
         payload.content_type = contentType.trim();
       }
@@ -146,15 +142,6 @@ function CreateForm({ onCreated }: { onCreated: () => void }) {
             placeholder="content type (optional)"
             className="flex-1 rounded-lg border border-line bg-canvas px-3 py-2 text-sm text-ink focus:border-wisteria focus:outline-none"
           />
-          <label className="flex items-center gap-2 text-sm text-ink-soft">
-            <input
-              type="checkbox"
-              checked={immutable}
-              onChange={(e) => setImmutable(e.target.checked)}
-              className="h-4 w-4 rounded border-line bg-canvas accent-wisteria-deep"
-            />
-            Immutable permalink
-          </label>
           <Button type="submit" disabled={busy}>
             {busy ? "Creating…" : "Create"}
           </Button>
