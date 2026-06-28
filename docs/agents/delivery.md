@@ -35,7 +35,8 @@ telemetry or analytics state — it is intentionally stateless beyond the cache.
    ```
    - **Live route** (`via_route = TRUE`) — the id owns a `routes` row; serve its
      current content with the route's `content_type`. It may be repointed by its
-     owner, so it is cached as **mutable** (short TTL).
+     owner, so it is cached as **mutable** (opportunistic never-expire; refreshed
+     in the background when stale).
    - **Content-addressed version** (`via_route = FALSE`) — the verified id is
      itself a content hash naming one exact stored block. Serve it directly and
      cache it as **immutable** (it can never change). This is the internal
@@ -74,7 +75,8 @@ telemetry or analytics state — it is intentionally stateless beyond the cache.
   `CachedSnippet`. The first stale reader wins a `compare_exchange(false→true)`
   and spawns the background task; all other concurrent stale readers skip it.
   No global lock, no per-id allocation.
-- The cache is **read-through**; never let it serve stale content after a write.
+- The cache is **read-through**. Correctness depends entirely on Control Plane
+  invalidation — never bypass or delay `cache.invalidate(id)` on a write.
 
 ## Cross-thread invalidation (critical)
 

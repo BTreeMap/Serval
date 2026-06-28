@@ -174,7 +174,8 @@ if present). See [.env.example](.env.example) for the full list.
 | `DATA_PLANE_ADDR` | `0.0.0.0:3000` | Delivery bind address |
 | `DATA_PLANE_PUBLIC_URL` | _(guessed)_ | Public Data Plane base URL (e.g. `https://cdn.example.com`) advertised to the dashboard for "copy link"; unset falls back to `:3000` on the dashboard host |
 | `CACHE_BYTE_BUDGET` | `33554432` | Delivery cache size cap, in bytes |
-| `CACHE_MUTABLE_TTL_SECS` | `300` | TTL for live-route entries in the cache |
+| `CACHE_MUTABLE_TTL_SECS` | `300` | Staleness threshold for live-route entries: triggers a background refresh and sets `stale-while-revalidate`; entries are **never evicted** by this timer |
+| `CACHE_SERVE_STALE` | `true` | `true` = serve stale bytes immediately and refresh in the background (opportunistic); `false` = revalidate synchronously before responding |
 | `AUTH_MODE` | `none` | `none` (local superuser), `oauth`, or `cloudflare` |
 | `OAUTH_ISSUER` / `OAUTH_AUDIENCE` / `OAUTH_JWKS_URL` | — | Required when `AUTH_MODE=oauth` |
 | `CLOUDFLARE_TEAM_DOMAIN` / `CLOUDFLARE_AUDIENCE` | — | Required when `AUTH_MODE=cloudflare` |
