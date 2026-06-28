@@ -13,21 +13,22 @@ export function Button({
     children,
     ...props
 }: React.ButtonHTMLAttributes<HTMLButtonElement> & {
-    variant?: "primary" | "secondary" | "ghost" | "danger";
+    variant?: "primary" | "secondary" | "ghost" | "danger" | "link";
     size?: "sm" | "md";
     loading?: boolean;
 }) {
     const base =
-        "inline-flex items-center justify-center gap-2 rounded-lg font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-wisteria/50 focus-visible:ring-offset-2 focus-visible:ring-offset-surface";
+        "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-lg border font-medium leading-none transition-colors disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-wisteria/50 focus-visible:ring-offset-2 focus-visible:ring-offset-surface";
     const sizes: Record<string, string> = {
-        sm: "px-3 py-2 text-xs",
-        md: "px-4 py-2 text-sm",
+        sm: "min-h-8 px-3 py-1.5 text-xs",
+        md: "min-h-9 px-4 py-2 text-sm",
     };
     const variants: Record<string, string> = {
-        primary: "bg-wisteria-deep text-white hover:bg-wisteria",
+        primary: "border-transparent bg-wisteria-deep text-white hover:bg-wisteria",
         secondary: "border border-line bg-surface text-ink hover:bg-canvas",
-        ghost: "bg-transparent text-ink-soft hover:bg-canvas hover:text-ink",
+        ghost: "border-transparent bg-transparent text-ink-soft hover:bg-canvas hover:text-ink",
         danger: "border border-clay/40 bg-clay/10 text-clay hover:bg-clay/20",
+        link: "border-transparent bg-transparent text-ink-soft underline decoration-dotted underline-offset-2 hover:text-wisteria-deep",
     };
     return (
         <button

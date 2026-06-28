@@ -176,14 +176,16 @@ function ContentTypeEditor({
 
   if (!editing) {
     return (
-      <button
+      <Button
         type="button"
+        variant="link"
+        size="sm"
         onClick={open}
-        className="rounded font-mono text-xs text-ink-soft underline decoration-dotted underline-offset-2 hover:text-wisteria-deep focus:outline-none focus-visible:ring-2 focus-visible:ring-wisteria/50"
+        className="min-h-0 px-0 py-0 font-mono"
         title="Edit content type"
       >
         {value}
-      </button>
+      </Button>
     );
   }
 
