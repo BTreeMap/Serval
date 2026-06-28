@@ -185,6 +185,11 @@ fn bind_delivery_listeners(addr: SocketAddr) -> Result<Vec<TcpListener>> {
             .map(|n| n.get())
             .unwrap_or(4)
             .max(1);
+        tracing::info!(
+            addr = %addr,
+            listeners = n,
+            "data plane: SO_REUSEPORT — binding {n} parallel accept queues"
+        );
         let mut listeners = Vec::with_capacity(n);
         for _ in 0..n {
             let sock = match addr {
@@ -210,6 +215,11 @@ fn bind_delivery_listeners(addr: SocketAddr) -> Result<Vec<TcpListener>> {
         not(target_os = "cygwin")
     )))]
     {
+        tracing::warn!(
+            addr = %addr,
+            "data plane: SO_REUSEPORT unavailable on this platform — \
+             using a single listener (reduced throughput at high concurrency)"
+        );
         let std_listener = std::net::TcpListener::bind(addr)
             .with_context(|| format!("failed to bind data plane on {addr}"))?;
         std_listener
