@@ -72,7 +72,7 @@ async fn main() -> Result<()> {
 async fn serve(config: Config, repo: Repository) -> Result<()> {
     // One cache handle is shared by both planes: a Control Plane write evicts
     // exactly what a Data Plane read would load.
-    let cache = DeliveryCache::new(config.cache_byte_budget, config.cache_mutable_ttl);
+    let cache = DeliveryCache::new(config.cache_byte_budget);
     // One signer derived from the deployment secret: the Control Plane mints
     // signed ids, the Data Plane verifies them. Both must share the same key.
     let signer = crypto::IdSigner::new(&config.id_secret);
@@ -103,8 +103,6 @@ async fn serve(config: Config, repo: Repository) -> Result<()> {
         repo: delivery_repo,
         cache,
         signer,
-        serve_stale: config.serve_stale,
-        refresh_after: config.cache_mutable_ttl,
     };
 
     let control_app = api::router(control_state);

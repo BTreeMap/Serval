@@ -243,20 +243,6 @@ impl Repository {
         }))
     }
 
-    /// Lightweight step-1 probe: return the current `target_hash` for a live
-    /// route without loading its content. Used by the serve-stale refresh logic
-    /// and the mutable `304` revalidation path to detect whether the content
-    /// has changed since the cached entry was populated. Returns `None` when the
-    /// id does not resolve to a live route (immutable content-hash ids have no
-    /// `routes` row).
-    pub async fn fetch_target_hash(&self, id: &RouteId) -> Result<Option<String>, sqlx::Error> {
-        let row = sqlx::query_as::<_, (String,)>("SELECT target_hash FROM routes WHERE id = $1")
-            .bind(id.as_str())
-            .fetch_optional(&self.pool)
-            .await?;
-        Ok(row.map(|(h,)| h))
-    }
-
     /// Count the history rows recorded for a route. Used by the audit view and
     /// by the infinite-ledger acceptance test.
     pub async fn history_count(&self, id: &RouteId) -> Result<i64, sqlx::Error> {

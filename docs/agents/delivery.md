@@ -35,8 +35,8 @@ telemetry or analytics state — it is intentionally stateless beyond the cache.
    ```
    - **Live route** (`via_route = TRUE`) — the id owns a `routes` row; serve its
      current content with the route's `content_type`. It may be repointed by its
-     owner, so it is cached as **mutable** (opportunistic never-expire; refreshed
-     in the background when stale).
+     owner, so it is cached as **mutable** (evicted on the owner's next write via
+     Control Plane invalidation).
    - **Content-addressed version** (`via_route = FALSE`) — the verified id is
      itself a content hash naming one exact stored block. Serve it directly and
      cache it as **immutable** (it can never change). This is the internal
@@ -53,39 +53,42 @@ telemetry or analytics state — it is intentionally stateless beyond the cache.
    falling back to the stored `content_type`.
 6. Render the content with the query variables through `renderer.rs`.
 7. Return `200 OK` with `ETag` and `Cache-Control` headers derived from **how
-   the id resolved**: a live route → `max-age=<refresh_after>,
-   stale-while-revalidate=<refresh_after>` (opportunistic) or `must-revalidate`
-   (blocking); a content-addressed version → `immutable`.
+   the id resolved**: a live route → `no-cache` (store but revalidate via the
+   `ETag`); a content-addressed version → `immutable, max-age=1y`.
 
 ## Cache constraints
 
-- Use the **`moka`** crate, asynchronous, byte-budget bounded. The cache is
-  **opportunistic** and **never time-evicts** entries.
+- Use the **`moka`** crate, asynchronous, byte-budget bounded. The cache
+  **never time-evicts** entries — there is no TTL, staleness window, or
+  background refresh.
 - **Two eviction paths only:**
   1. **Explicit Control Plane invalidation** — `cache.invalidate(id)` on every
      write. This is the sole freshness guarantee (acceptance criterion #1).
   2. **Byte-budget pressure** — moka's LRU weigher evicts the least-recently-used
      entry when total byte weight exceeds `CACHE_BYTE_BUDGET`.
-- Staleness (`CACHE_MUTABLE_TTL_SECS`, default 300 s) is a **refresh trigger**
-  only. A mutable entry older than this threshold is served immediately
-  (`CACHE_SERVE_STALE=true`, default) while a lock-free background refresh
-  updates the cache, or revalidated synchronously before responding
-  (`CACHE_SERVE_STALE=false`). Either way the entry is never dropped by time.
-- The lock-free single-flight guard is a per-entry `AtomicBool` inside
-  `CachedSnippet`. The first stale reader wins a `compare_exchange(false→true)`
-  and spawns the background task; all other concurrent stale readers skip it.
-  No global lock, no per-id allocation.
+- **Why no TTL is needed.** The Control Plane is the *sole writer* and
+  `content_blocks` are immutable, so a cached entry is **provably current**
+  between invalidations — there is no second writer and no clock-driven
+  divergence to re-discover. A read is a single `moka` `get_or_load`: a hit, or
+  one coalesced 1-RTT load on a miss.
 - The cache is **read-through**. Correctness depends entirely on Control Plane
   invalidation — never bypass or delay `cache.invalidate(id)` on a write.
 
-## Cross-thread invalidation (critical)
+## Single-process / cross-thread invalidation (critical)
 
 A Control Plane write — `PATCH /api/snippets/{id}` or
 `POST /api/snippets/{id}/restore` — updates the `routes` pointer and MUST
-**instantly evict `{id}`** from the Data Plane `moka` cache. Use a cross-thread
-message (channel) or the cache's own concurrent eviction API — not a coarse
-shared `Mutex` over the whole cache. The very next Data Plane GET for that `id`
-must reflect the new content (acceptance criterion #1).
+**instantly evict `{id}`** from the Data Plane `moka` cache. Both planes share
+**one cache handle in one process** (as `main.rs` wires them), so the eviction
+is immediate via the cache's own concurrent API — no channel or coarse `Mutex`.
+The very next Data Plane GET for that `id` reflects the new content (acceptance
+criterion #1).
+
+Because freshness rests entirely on this in-process invalidation, the two planes
+**must not** be split across processes. Doing so would need a notification
+channel (e.g. Postgres `LISTEN/NOTIFY`) to carry invalidations between them and
+is out of scope. Edge caches handle this via the `no-cache` + `ETag` revalidation
+loop, not via the in-process cache.
 
 ## Rendering engine (`src/renderer.rs`)
 

@@ -7,18 +7,16 @@
 //! 2. **Immutable shortcut** — if the client already holds the exact
 //!    content-addressed version (`If-None-Match: "<id>"`), return `304`
 //!    immediately with no cache or database work.
-//! 3. **Conditional GET on cache hits** — compute the strong ETag from the
-//!    cached `target_hash` and raw query; return `304` if it matches, else
-//!    render and serve.  Fresh hits with `If-None-Match` run a cheap step-1
-//!    probe (one PK scan on `routes`) so the `304` is never stale.
-//! 4. **Opportunistic serve-stale** — stale mutable entries (age >
-//!    `refresh_after`) are served immediately while a lock-free single-flight
-//!    background task performs a two-step refresh: step-1 checks whether the
-//!    hash changed (cheap), step-2 pulls content only if it did. Entries are
-//!    **never time-evicted**; the only removal paths are explicit Control Plane
-//!    invalidation and byte-budget pressure. When `CACHE_SERVE_STALE=false`
-//!    (blocking mode) a stale hit revalidates synchronously before responding.
-//! 5. **Miss** — unchanged 1-RTT `fetch_for_delivery` → render → `200`.
+//! 3. **Read-through cache** — a single [`DeliveryCache::get_or_load`] resolves
+//!    a hit or coalesces concurrent misses into one 1-RTT `fetch_for_delivery`.
+//!    A present entry is always current: the Control Plane invalidates it on
+//!    every write, so there is no TTL, staleness window, or background refresh.
+//! 4. **Conditional GET** — compute the strong ETag from the cached
+//!    `target_hash` and raw query; return `304` if `If-None-Match` matches,
+//!    else render and serve `200`.
+//!
+//! Freshness rests entirely on Control Plane invalidation, which requires both
+//! planes to share one cache handle in one process (see [`crate::cache`]).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -30,8 +28,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use tower_http::set_header::SetResponseHeaderLayer;
 
-use crate::cache::{CachedSnippet, DeliveryCache, RefreshGuard};
-use crate::db::Repository;
+use crate::cache::CachedSnippet;
 use crate::db::models::{CacheMode, RouteId};
 use crate::renderer;
 use crate::state::DeliveryState;
@@ -116,7 +113,6 @@ async fn deliver(
 
     let raw_query = query.unwrap_or("").as_bytes();
     let inm = headers.get(header::IF_NONE_MATCH);
-    let ttl_secs = state.refresh_after.as_secs();
 
     // Immutable shortcut: for content-addressed ids the ETag is just `"<id>"`.
     // If the client already holds that exact validator, return 304 before the
@@ -130,258 +126,44 @@ async fn deliver(
     {
         return build_not_modified(
             str_to_header(&immutable_etag_str),
-            cache_control_for(CacheMode::Immutable, ttl_secs, state.serve_stale),
+            cache_control_for(CacheMode::Immutable),
         );
     }
 
-    match state.cache.get_cached(&id).await {
-        // ── MISS: unchanged 1-RTT fast path ─────────────────────────────────
-        None => {
-            let repo = state.repo.clone();
-            let load_id = id.clone();
-            let loaded = state
-                .cache
-                .get_or_load(&id, move || async move {
-                    match repo.fetch_for_delivery(&load_id).await {
-                        Ok(Some(record)) => Ok(CachedSnippet::from(record)),
-                        Ok(None) => Err(LoadError::NotFound),
-                        Err(e) => Err(LoadError::Database(e)),
-                    }
-                })
-                .await;
-
-            let snippet = match loaded {
-                Ok(s) => s,
-                Err(e) => return load_error_response(&e),
-            };
-
-            let etag = compute_etag(
-                raw_id,
-                snippet.cache_mode,
-                &snippet.target_hash,
-                raw_query,
-                state,
-            );
-            if let Some(v) = inm
-                && etag_matches(v, &etag)
-            {
-                return build_not_modified(
-                    etag,
-                    cache_control_for(snippet.cache_mode, ttl_secs, state.serve_stale),
-                );
+    // Read-through the cache: a hit returns immediately; concurrent misses are
+    // coalesced into a single 1-RTT load. A present entry is always current
+    // because the Control Plane invalidates on every write.
+    let repo = state.repo.clone();
+    let load_id = id.clone();
+    let loaded = state
+        .cache
+        .get_or_load(&id, move || async move {
+            match repo.fetch_for_delivery(&load_id).await {
+                Ok(Some(record)) => Ok(CachedSnippet::from(record)),
+                Ok(None) => Err(LoadError::NotFound),
+                Err(e) => Err(LoadError::Database(e)),
             }
-            build_ok(&snippet, filename, query, raw_query, etag, ttl_secs, state)
-        }
+        })
+        .await;
 
-        // ── HIT (fresh or stale) ─────────────────────────────────────────────
-        Some((snippet, is_stale)) => {
-            // For a fresh hit with If-None-Match, run the cheap step-1 probe so
-            // the 304 decision is always current. For stale hits (or absent INM)
-            // derive the ETag from the cached hash — zero additional DB work.
-            let etag = if !is_stale {
-                if let Some(v) = inm {
-                    // Step-1 probe: one PK scan on `routes`.
-                    match state.repo.fetch_target_hash(&id).await {
-                        Ok(Some(ref current_hash)) => {
-                            let fresh_etag = mutable_etag(current_hash, raw_query, state);
-                            if etag_matches(v, &fresh_etag) {
-                                return build_not_modified(
-                                    fresh_etag,
-                                    cache_control_for(
-                                        CacheMode::Mutable,
-                                        ttl_secs,
-                                        state.serve_stale,
-                                    ),
-                                );
-                            }
-                            fresh_etag
-                        }
-                        // Immutable id (no route row) or DB error: fall through
-                        // with the cached ETag.
-                        Ok(None) | Err(_) => compute_etag(
-                            raw_id,
-                            snippet.cache_mode,
-                            &snippet.target_hash,
-                            raw_query,
-                            state,
-                        ),
-                    }
-                } else {
-                    compute_etag(
-                        raw_id,
-                        snippet.cache_mode,
-                        &snippet.target_hash,
-                        raw_query,
-                        state,
-                    )
-                }
-            } else {
-                compute_etag(
-                    raw_id,
-                    snippet.cache_mode,
-                    &snippet.target_hash,
-                    raw_query,
-                    state,
-                )
-            };
+    let snippet = match loaded {
+        Ok(s) => s,
+        Err(e) => return load_error_response(&e),
+    };
 
-            // Stale hit: serve immediately (opportunistic) or revalidate
-            // synchronously (blocking), depending on the serve_stale toggle.
-            if is_stale {
-                if state.serve_stale {
-                    // Opportunistic: serve the cached bytes now, fire a
-                    // lock-free single-flight refresh in the background. The
-                    // RAII guard releases the claim on drop, so the entry can
-                    // never be frozen out of future refreshes.
-                    if let Some(guard) = RefreshGuard::try_acquire(&snippet) {
-                        let repo = state.repo.clone();
-                        let cache = state.cache.clone();
-                        let bg_id = id.clone();
-                        tokio::spawn(background_refresh(repo, cache, bg_id, guard));
-                    }
-                } else {
-                    // Blocking: revalidate inline before responding so the
-                    // client always gets a current response.
-                    let refreshed = inline_refresh(&state.repo, &state.cache, &id).await;
-                    if let Some(fresh) = refreshed {
-                        let fresh_etag = compute_etag(
-                            raw_id,
-                            fresh.cache_mode,
-                            &fresh.target_hash,
-                            raw_query,
-                            state,
-                        );
-                        if let Some(v) = inm
-                            && etag_matches(v, &fresh_etag)
-                        {
-                            return build_not_modified(
-                                fresh_etag,
-                                cache_control_for(fresh.cache_mode, ttl_secs, state.serve_stale),
-                            );
-                        }
-                        return build_ok(
-                            &fresh, filename, query, raw_query, fresh_etag, ttl_secs, state,
-                        );
-                    }
-                }
-            }
-
-            // INM check against the (possibly step-1-refreshed) ETag.
-            if let Some(v) = inm
-                && etag_matches(v, &etag)
-            {
-                return build_not_modified(
-                    etag,
-                    cache_control_for(snippet.cache_mode, ttl_secs, state.serve_stale),
-                );
-            }
-
-            build_ok(&snippet, filename, query, raw_query, etag, ttl_secs, state)
-        }
+    let etag = compute_etag(
+        raw_id,
+        snippet.cache_mode,
+        &snippet.target_hash,
+        raw_query,
+        state,
+    );
+    if let Some(v) = inm
+        && etag_matches(v, &etag)
+    {
+        return build_not_modified(etag, cache_control_for(snippet.cache_mode));
     }
-}
-
-/// Background two-step refresh for a stale cache entry.
-///
-/// Step-1: cheap hash probe — if the route's `target_hash` is unchanged, just
-/// reset the entry's freshness timer (zero data movement). Step-2: only if the
-/// hash changed, pull the full content and re-insert. The `RefreshGuard`
-/// releases the single-flight claim when this task ends — on success, error, or
-/// panic — so the entry can always be re-claimed for a future refresh.
-async fn background_refresh(
-    repo: Repository,
-    cache: DeliveryCache,
-    id: RouteId,
-    guard: RefreshGuard,
-) {
-    let entry = guard.entry();
-    match repo.fetch_target_hash(&id).await {
-        Ok(Some(ref current_hash)) if current_hash.as_str() != entry.target_hash.as_ref() => {
-            // Hash changed: step-2 data pull. The replacement entry carries a
-            // fresh refresh flag; releasing this (old) entry's claim on drop is
-            // harmless because the old entry is no longer reachable.
-            match repo.fetch_for_delivery(&id).await {
-                Ok(Some(record)) => {
-                    cache.insert(&id, record).await;
-                }
-                Ok(None) => {
-                    cache.invalidate(&id).await;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "background refresh step-2 failed");
-                }
-            }
-        }
-        Ok(Some(_)) => {
-            // Hash unchanged: reset the freshness timer — zero data movement.
-            cache.touch(&id, Arc::clone(entry)).await;
-        }
-        Ok(None) => {
-            // The route no longer exists. Evict the orphaned entry so the next
-            // read misses and resolves to a 404 — leaving it cached would serve
-            // deleted content indefinitely.
-            cache.invalidate(&id).await;
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "background refresh step-1 failed");
-        }
-    }
-    // `guard` drops here, releasing the single-flight claim.
-}
-
-/// Synchronous inline revalidation for the blocking serve-stale=false mode.
-///
-/// Runs the same two-step probe as the background refresh but on the calling
-/// goroutine. Returns the up-to-date snippet (from cache or fresh DB load), or
-/// `None` if the route no longer exists.
-async fn inline_refresh(
-    repo: &Repository,
-    cache: &DeliveryCache,
-    id: &RouteId,
-) -> Option<Arc<CachedSnippet>> {
-    match repo.fetch_target_hash(id).await {
-        Ok(Some(ref current_hash)) => {
-            // Check cached hash to decide if a step-2 pull is needed.
-            let cached_hash = cache
-                .get_cached(id)
-                .await
-                .map(|(e, _)| Arc::clone(&e.target_hash));
-            if cached_hash.as_deref() != Some(current_hash.as_str()) {
-                // Hash changed or not cached: step-2 data pull.
-                match repo.fetch_for_delivery(id).await {
-                    Ok(Some(record)) => {
-                        let fresh = cache.insert(id, record).await;
-                        Some(fresh)
-                    }
-                    Ok(None) => {
-                        cache.invalidate(id).await;
-                        None
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "inline refresh step-2 failed");
-                        // Fall back to stale entry if available.
-                        cache.get_cached(id).await.map(|(e, _)| e)
-                    }
-                }
-            } else {
-                // Hash unchanged: reset freshness timer, return existing entry.
-                if let Some((entry, _)) = cache.get_cached(id).await {
-                    cache.touch(id, Arc::clone(&entry)).await;
-                    Some(entry)
-                } else {
-                    None
-                }
-            }
-        }
-        Ok(None) => {
-            cache.invalidate(id).await;
-            None
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "inline refresh step-1 failed");
-            cache.get_cached(id).await.map(|(e, _)| e)
-        }
-    }
+    build_ok(&snippet, filename, query, etag)
 }
 
 /// Map a load failure to a response, logging only genuine database errors.
@@ -400,16 +182,12 @@ fn build_ok(
     snippet: &CachedSnippet,
     filename: Option<&str>,
     query: Option<&str>,
-    raw_query: &[u8],
     etag: HeaderValue,
-    ttl_secs: u64,
-    state: &DeliveryState,
 ) -> Response {
     let variables = parse_query(query);
     let body = renderer::render(&snippet.content, &variables);
     let content_type = resolve_content_type(filename, &snippet.content_type);
-    let cc = cache_control_for(snippet.cache_mode, ttl_secs, state.serve_stale);
-    let _ = raw_query; // captured in etag already
+    let cc = cache_control_for(snippet.cache_mode);
     (
         StatusCode::OK,
         [
@@ -497,24 +275,15 @@ fn resolve_content_type(filename: Option<&str>, stored: &str) -> HeaderValue {
 ///
 /// * **Immutable** ids → `public, max-age=31536000, immutable` (safe to cache
 ///   forever at the edge; the content never changes).
-/// * **Mutable** routes, serve-stale on → `public, max-age=<ttl>,
-///   stale-while-revalidate=<ttl>`. The CDN may serve stale for one extra TTL
-///   while it revalidates in the background, matching the in-process behaviour.
-/// * **Mutable** routes, serve-stale off → `public, max-age=<ttl>,
-///   must-revalidate`.
-fn cache_control_for(mode: CacheMode, mutable_ttl_secs: u64, serve_stale: bool) -> HeaderValue {
+/// * **Mutable** routes → `no-cache`. A downstream cache may store the response
+///   but MUST revalidate with the origin (via the strong `ETag`) before reuse,
+///   because our in-process invalidation cannot reach the edge. The steady
+///   state is a cheap conditional GET answered with `304` from the cache, so
+///   there is zero edge-staleness window.
+fn cache_control_for(mode: CacheMode) -> HeaderValue {
     match mode {
         CacheMode::Immutable => HeaderValue::from_static("public, max-age=31536000, immutable"),
-        CacheMode::Mutable => {
-            let s = if serve_stale {
-                format!(
-                    "public, max-age={mutable_ttl_secs}, stale-while-revalidate={mutable_ttl_secs}"
-                )
-            } else {
-                format!("public, max-age={mutable_ttl_secs}, must-revalidate")
-            };
-            str_to_header(&s)
-        }
+        CacheMode::Mutable => HeaderValue::from_static("no-cache"),
     }
 }
 
@@ -587,22 +356,12 @@ mod tests {
     #[test]
     fn cache_control_reflects_mutability() {
         assert_eq!(
-            cache_control_for(CacheMode::Immutable, 300, false)
-                .to_str()
-                .unwrap(),
+            cache_control_for(CacheMode::Immutable).to_str().unwrap(),
             "public, max-age=31536000, immutable"
         );
         assert_eq!(
-            cache_control_for(CacheMode::Mutable, 300, false)
-                .to_str()
-                .unwrap(),
-            "public, max-age=300, must-revalidate"
-        );
-        assert_eq!(
-            cache_control_for(CacheMode::Mutable, 300, true)
-                .to_str()
-                .unwrap(),
-            "public, max-age=300, stale-while-revalidate=300"
+            cache_control_for(CacheMode::Mutable).to_str().unwrap(),
+            "no-cache"
         );
     }
 

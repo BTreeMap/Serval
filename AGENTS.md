@@ -56,22 +56,24 @@ Full test / E2E / Dockerized PostgreSQL commands →
   move it after the cache. → [docs/agents/delivery.md](docs/agents/delivery.md).
 - **Always evict the `moka` cache on writes.** A Control Plane write (`PATCH` or
   restore) MUST invalidate the affected `id` in the Data Plane cache so the next
-  GET reflects the change. → [docs/agents/delivery.md](docs/agents/delivery.md).
+  GET reflects the change. This is the **sole** freshness mechanism — there is no
+  TTL or background refresh. → [docs/agents/delivery.md](docs/agents/delivery.md).
 - **ETag-first delivery.** Every `200` carries a strong `ETag`. Content-addressed
   ids use `"<id>"` as their validator (no computation); mutable routes use a
   keyed BLAKE3 hash of `target_hash || raw_query` under a key distinct from the
   id MAC. An `If-None-Match` match on a verified content-addressed id returns
   `304` before any cache or DB work.
-- **Opportunistic never-expire cache.** Mutable entries are **never time-evicted**;
-  the only removal paths are explicit Control Plane invalidation (the sole
-  freshness guarantee) and byte-budget pressure. Staleness (`CACHE_MUTABLE_TTL_SECS`
-  threshold) is a refresh *trigger*, not an eviction mechanism. By default
-  (`CACHE_SERVE_STALE=true`) a stale entry is served immediately while a lock-free
-  single-flight background task performs a two-step refresh — step-1 probes the
-  `target_hash` only (cheap PK scan; zero data movement if unchanged), step-2 pulls
-  content only when the hash changed. With `CACHE_SERVE_STALE=false` a stale read
-  revalidates synchronously before responding. The uncached miss path stays 1-RTT
-  unchanged.
+- **Invalidation is the only freshness mechanism.** The Control Plane is the sole
+  writer and `content_blocks` are immutable, so a cached entry is provably current
+  between invalidations. There is **no** TTL, staleness window, serve-stale mode,
+  or background refresh — an entry leaves the cache only by explicit Control Plane
+  invalidation or byte-budget pressure. This requires both planes to **share one
+  cache handle in one process** (as `main.rs` wires them); splitting them across
+  processes would need a notification channel (e.g. Postgres `LISTEN/NOTIFY`) and
+  is out of scope. Mutable responses ship `Cache-Control: no-cache` so any edge
+  cache revalidates via the `ETag` (steady state: a cheap conditional GET →
+  `304`); immutable ids ship `max-age=1y, immutable`. The uncached miss path is
+  1-RTT. → [docs/agents/delivery.md](docs/agents/delivery.md).
 - **Don't bypass the storage layer.** Persistence goes through the shared pool;
   don't open ad-hoc DB connections inside handlers.
 - **Frontend: don't call `fetch`/`axios` directly.** Use the shared API client

@@ -7,7 +7,6 @@
 //! without any channel or coarse lock.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use crate::auth::AuthService;
 use crate::cache::DeliveryCache;
@@ -35,13 +34,4 @@ pub struct DeliveryState {
     pub cache: DeliveryCache,
     /// Verifies the route-id MAC before any cache or database lookup.
     pub signer: IdSigner,
-    /// Whether to serve stale mutable entries opportunistically (immediate
-    /// response + background refresh) or synchronously (revalidate before
-    /// responding). Either way entries are never time-evicted from the cache;
-    /// only invalidation or byte-budget pressure removes them.
-    pub serve_stale: bool,
-    /// Staleness threshold for mutable cache entries. An entry older than this
-    /// triggers a background refresh. Also used as the
-    /// `stale-while-revalidate` and `max-age` header value.
-    pub refresh_after: Duration,
 }

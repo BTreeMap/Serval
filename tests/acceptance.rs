@@ -12,8 +12,6 @@
 //! as the binary wires them — and drives them over real HTTP with `reqwest`.
 #![cfg(feature = "integration")]
 
-use std::time::Duration;
-
 use serde_json::{Value, json};
 use serval::api;
 use serval::auth::{AuthConfig, AuthService};
@@ -61,7 +59,7 @@ impl Harness {
         let repo = Repository::new(pool);
 
         // The single shared cache is the crux of acceptance criterion #1.
-        let cache = DeliveryCache::new(32 * 1024 * 1024, Duration::from_secs(300));
+        let cache = DeliveryCache::new(32 * 1024 * 1024);
         // One signer shared by both planes, exactly as the binary wires it.
         let signer = IdSigner::new(TEST_ID_SECRET);
         let auth = Arc::new(
@@ -81,8 +79,6 @@ impl Harness {
             repo,
             cache,
             signer: signer.clone(),
-            serve_stale: true,
-            refresh_after: Duration::from_secs(300),
         };
 
         let control_base = serve(api::router(control_state)).await;
@@ -670,13 +666,14 @@ async fn immutable_etag_is_id_and_304_is_instant() {
     );
 }
 
-/// `Cache-Control` for mutable routes carries `stale-while-revalidate` when
-/// serve-stale is enabled (the default in the test harness).
+/// `Cache-Control` for mutable routes is `no-cache`: a downstream cache may
+/// store the response but must revalidate via the strong ETag before reuse,
+/// because in-process invalidation cannot reach the edge.
 #[tokio::test]
-async fn cache_control_has_stale_while_revalidate() {
+async fn cache_control_mutable_is_no_cache() {
     let h = Harness::start().await;
 
-    let created = h.create(json!({ "content": "swr payload" })).await;
+    let created = h.create(json!({ "content": "no-cache payload" })).await;
     let id = created["id"].as_str().expect("id").to_owned();
 
     let (_, headers) = h.deliver(&id).await;
@@ -685,12 +682,8 @@ async fn cache_control_has_stale_while_revalidate() {
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default();
 
-    assert!(
-        cc.contains("stale-while-revalidate"),
-        "mutable route must carry stale-while-revalidate in Cache-Control, got {cc:?}"
-    );
-    assert!(
-        !cc.contains("must-revalidate"),
-        "stale-while-revalidate and must-revalidate are mutually exclusive, got {cc:?}"
+    assert_eq!(
+        cc, "no-cache",
+        "mutable route must carry no-cache in Cache-Control, got {cc:?}"
     );
 }
