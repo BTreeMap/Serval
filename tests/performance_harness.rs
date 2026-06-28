@@ -392,11 +392,26 @@ async fn run_peak_profile(h: &Harness, id: &str) -> (Vec<PeakStageReport>, PeakS
 
     let mut stages = Vec::new();
     let mut unhealthy_stages = 0_u64;
+    let mut stage_num = 0_u32;
 
     loop {
+        stage_num += 1;
+        eprintln!(
+            "[peak   ] stage {stage_num}: concurrency={current} duration={stage_duration_secs}s  (max={max_concurrency})"
+        );
         let duration = Duration::from_secs(stage_duration_secs);
+        let t0 = Instant::now();
         let snapshot = run_data_plane_stage(h, id, current as usize, duration).await;
         let healthy = stage_is_healthy(snapshot, max_error_rate, max_p95_ms);
+        eprintln!(
+            "[peak   ] stage {stage_num}: {rps:.0} rps  p50={p50}ms p95={p95}ms err={err:.2}%  {status}  ({elapsed:.1}s)",
+            rps = snapshot.throughput_rps,
+            p50 = snapshot.p50_ms,
+            p95 = snapshot.p95_ms,
+            err = snapshot.error_rate * 100.0,
+            status = if healthy { "healthy" } else { "UNHEALTHY" },
+            elapsed = t0.elapsed().as_secs_f64(),
+        );
         stages.push(PeakStageReport {
             concurrency: current,
             duration_secs: stage_duration_secs,
@@ -598,8 +613,14 @@ async fn run_adversarial_profile(
 
     let mut stages = Vec::new();
     let mut unhealthy_stages = 0_u64;
+    let mut stage_num = 0_u32;
 
     loop {
+        stage_num += 1;
+        eprintln!(
+            "[adv    ] stage {stage_num}: forged={forged_concurrency} legit={legit_concurrency} duration={stage_duration_secs}s  (max_forged={max_forged_concurrency})"
+        );
+        let t0 = Instant::now();
         let duration = Duration::from_secs(stage_duration_secs);
         let mut stage = run_adversarial_stage(
             h,
@@ -616,6 +637,20 @@ async fn run_adversarial_profile(
             && stage.legit.p95_ms <= max_legit_p95_ms
             && stage.forged_rejection_rate >= min_forged_rejection_rate
             && stage.control_write_success_rate >= min_control_write_success_rate;
+
+        eprintln!(
+            "[adv    ] stage {stage_num}: legit={legit_rps:.0} rps  p95={p95}ms  forged_rej={rej:.1}%  cp_ok={cp:.0}%  {status}  ({elapsed:.1}s)",
+            legit_rps = stage.legit.throughput_rps,
+            p95 = stage.legit.p95_ms,
+            rej = stage.forged_rejection_rate * 100.0,
+            cp = stage.control_write_success_rate * 100.0,
+            status = if stage.healthy {
+                "healthy"
+            } else {
+                "UNHEALTHY"
+            },
+            elapsed = t0.elapsed().as_secs_f64(),
+        );
 
         if stage.healthy {
             unhealthy_stages = 0;
@@ -650,11 +685,25 @@ async fn comprehensive_performance_harness() {
         .create(json!({ "content": "Hello {{tenant}} on {{port}}" }))
         .await;
     let id = created["id"].as_str().expect("snippet id").to_owned();
+    eprintln!("[harness] snippet id = {id}");
 
+    eprintln!("[harness] ── peak traffic profile ────────────────────────────────");
     let (peak_stages, peak_best, peak_max_tested_concurrency) =
         run_peak_profile(&harness, &id).await;
+    eprintln!(
+        "[harness] peak best: {} rps @ c{}  p95={}ms",
+        peak_best.snapshot.throughput_rps as u64, peak_best.concurrency, peak_best.snapshot.p95_ms,
+    );
+
+    eprintln!("[harness] ── adversarial profile ───────────────────────────────");
     let (adversarial_stages, adversarial_best, adversarial_max_tested_forged_concurrency) =
         run_adversarial_profile(&harness, &id).await;
+    eprintln!(
+        "[harness] adversarial best: forged_c={} legit={} rps  forged_rej={:.1}%",
+        adversarial_best.forged_concurrency,
+        adversarial_best.legit.throughput_rps as u64,
+        adversarial_best.forged_rejection_rate * 100.0,
+    );
 
     let report = Report {
         peak_stages,
