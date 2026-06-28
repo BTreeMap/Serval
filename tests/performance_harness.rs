@@ -584,6 +584,8 @@ async fn run_adversarial_profile(
     let writer_interval_ms = env_u64("PERF_ADVERSARIAL_WRITER_INTERVAL_MS", 120);
     let stage_duration_secs = env_u64("PERF_ADVERSARIAL_STAGE_DURATION_SECS", 8);
 
+    let min_legit_throughput_rps =
+        env_u64("PERF_ADVERSARIAL_CONTINUE_MIN_LEGIT_RPS", 150) as f64;
     let max_legit_error_rate = env_u64("PERF_ADVERSARIAL_CONTINUE_MAX_ERROR_PCT", 8) as f64 / 100.0;
     let max_legit_p95_ms = env_u64("PERF_ADVERSARIAL_CONTINUE_MAX_P95_MS", 1600) as f64;
     let min_forged_rejection_rate =
@@ -610,7 +612,8 @@ async fn run_adversarial_profile(
         )
         .await;
 
-        stage.healthy = stage.legit.error_rate <= max_legit_error_rate
+        stage.healthy = stage.legit.throughput_rps >= min_legit_throughput_rps
+            && stage.legit.error_rate <= max_legit_error_rate
             && stage.legit.p95_ms <= max_legit_p95_ms
             && stage.forged_rejection_rate >= min_forged_rejection_rate
             && stage.control_write_success_rate >= min_control_write_success_rate;

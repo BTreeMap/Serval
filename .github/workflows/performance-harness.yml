@@ -68,6 +68,7 @@ jobs:
           PERF_ADVERSARIAL_FORGED_MULTIPLIER_PCT: "175"
           PERF_ADVERSARIAL_STAGE_DURATION_SECS: "8"
           PERF_ADVERSARIAL_WRITER_INTERVAL_MS: "120"
+          PERF_ADVERSARIAL_CONTINUE_MIN_LEGIT_RPS: "150"
           PERF_ADVERSARIAL_CONTINUE_MAX_ERROR_PCT: "8"
           PERF_ADVERSARIAL_CONTINUE_MAX_P95_MS: "1600"
           PERF_ADVERSARIAL_CONTINUE_MIN_FORGED_REJECTION_PCT: "98"
@@ -81,6 +82,50 @@ jobs:
           PERF_ASSERT_ADVERSARIAL_MAX_LEGIT_ERROR_PCT: "15"
           PERF_ASSERT_FORGED_REJECTION_PCT: "99"
           PERF_ASSERT_CONTROL_WRITE_SUCCESS_PCT: "80"
+
+      - name: Generate step summary
+        if: always()
+        run: |
+          REPORT=target/performance-harness-report.json
+          if [ ! -f "$REPORT" ]; then
+            echo '> No performance report produced (harness did not complete).' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          jq -r '
+            "## Peak Traffic Profile\n",
+            "| Concurrency | RPS | p50 ms | p95 ms | p99 ms | Errors | Status |",
+            "|---:|---:|---:|---:|---:|---:|:---:|",
+            (.peak_stages[] |
+              "| " + (.concurrency|tostring)
+              + " | " + (.snapshot.throughput_rps * 10 | round / 10 | tostring)
+              + " | " + (.snapshot.p50_ms|tostring)
+              + " | " + (.snapshot.p95_ms|tostring)
+              + " | " + (.snapshot.p99_ms|tostring)
+              + " | " + (.snapshot.error_rate * 10000 | round / 100 | tostring) + "%"
+              + " | " + (if .healthy then "✅" else "❌" end) + " |"
+            ),
+            "\n**Best:** `" + (.peak_best.concurrency|tostring) + "` concurrency → **"
+              + (.peak_best.snapshot.throughput_rps * 10 | round / 10 | tostring)
+              + " rps** · p95 " + (.peak_best.snapshot.p95_ms|tostring) + " ms\n",
+            "---\n",
+            "## Adversarial Profile\n",
+            "| Forged conc. | Legit RPS | Legit p95 ms | Legit errors | Forged rejection | CP writes ok | Status |",
+            "|---:|---:|---:|---:|---:|---:|:---:|",
+            (.adversarial_stages[] |
+              "| " + (.forged_concurrency|tostring)
+              + " | " + (.legit.throughput_rps * 10 | round / 10 | tostring)
+              + " | " + (.legit.p95_ms|tostring)
+              + " | " + (.legit.error_rate * 10000 | round / 100 | tostring) + "%"
+              + " | " + (.forged_rejection_rate * 10000 | round / 100 | tostring) + "%"
+              + " | " + (.control_write_success_rate * 100 | round | tostring) + "%"
+              + " | " + (if .healthy then "✅" else "❌" end) + " |"
+            ),
+            "\n**Best:** `" + (.adversarial_best.forged_concurrency|tostring)
+              + "` forged concurrency → legit **"
+              + (.adversarial_best.legit.throughput_rps * 10 | round / 10 | tostring)
+              + " rps** · forged rejection **"
+              + (.adversarial_best.forged_rejection_rate * 10000 | round / 100 | tostring) + "%**"
+          ' "$REPORT" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload performance report
         uses: actions/upload-artifact@v4
