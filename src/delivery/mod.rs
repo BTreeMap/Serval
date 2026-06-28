@@ -136,7 +136,9 @@ async fn deliver(
     // coalesced into a single 1-RTT load. A present entry is always current
     // because the Control Plane invalidates on every write.
     let repo = state.repo.clone();
-    let load_id = id.clone();
+    // `RouteId` is `Copy`, so the loader closure captures its own inline copy
+    // (a 64-byte stack memcpy) with no allocation or refcount.
+    let load_id = id;
     let loaded = state
         .cache
         .get_or_load(&id, move || async move {

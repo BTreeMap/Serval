@@ -202,7 +202,7 @@ pub async fn create_snippet(
     let inserted = state
         .repo
         .create_route(CreateRoute {
-            id: id.clone(),
+            id,
             hash: hash.clone(),
             content: &req.content,
             content_type: &content_type,

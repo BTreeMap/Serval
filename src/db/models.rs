@@ -18,16 +18,20 @@ use crate::crypto::ID_LEN;
 /// so the Data Plane can address a specific stored version directly — but that
 /// is an internal delivery detail, never a separate user-facing kind of route.
 ///
-/// Backed by an `Arc<str>` rather than a `String`. The Data Plane allocates the
-/// id exactly once (at [`parse`](Self::parse)); the cache must then own the key
-/// for longer than the request, and the loader closure needs its own copy. With
-/// shared ownership those follow-on copies — `clone` for the closure and moka's
-/// internal key clone on insert — are atomic refcount bumps, never fresh 64-byte
-/// heap allocations. Borrowing stays a plain, safe deref via [`as_str`].
+/// Backed by a fixed-capacity, inline [`ArrayString<ID_LEN>`] rather than a
+/// heap `String` — the type *is* "a validated string of exactly [`ID_LEN`]
+/// characters". This makes the id `Copy` and keeps it entirely off the
+/// allocator on the Data Plane hot path: `parse` writes the bytes into the
+/// stack buffer, the loader-closure copy and moka's internal key clone are
+/// 64-byte `memcpy`s (no refcount, no allocation), and the cache stores the key
+/// inline in its node instead of in a separate per-entry heap allocation.
+/// `ArrayString` preserves its UTF-8 invariant internally, so [`as_str`] stays
+/// a safe, zero-cost borrow with no `unsafe` and no re-validation.
 ///
+/// [`ArrayString<ID_LEN>`]: arrayvec::ArrayString
 /// [`as_str`]: Self::as_str
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct RouteId(std::sync::Arc<str>);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RouteId(arrayvec::ArrayString<ID_LEN>);
 
 /// Error returned when a candidate route id fails validation.
 #[derive(Debug, thiserror::Error)]
@@ -41,9 +45,10 @@ pub enum RouteIdError {
 impl RouteId {
     /// Parse and validate an untrusted id (e.g. from a request path).
     ///
-    /// The structural checks (length, then charset) run before the id is
-    /// materialized, so malformed input is rejected without any allocation;
-    /// only a well-formed id is interned into the single shared `Arc<str>`.
+    /// The structural checks (length, then charset) run first, so malformed
+    /// input is rejected up front; a well-formed id is then copied into the
+    /// inline buffer without ever touching the heap. The length check
+    /// guarantees the id fits the fixed [`ID_LEN`] capacity exactly.
     pub fn parse(raw: &str) -> Result<Self, RouteIdError> {
         if raw.len() != ID_LEN {
             return Err(RouteIdError::WrongLength(raw.len()));
@@ -54,7 +59,10 @@ impl RouteId {
         {
             return Err(RouteIdError::InvalidCharacter);
         }
-        Ok(Self(std::sync::Arc::from(raw)))
+        // Infallible: `raw.len() == ID_LEN` equals the buffer capacity.
+        Ok(Self(
+            arrayvec::ArrayString::from(raw).expect("len == ID_LEN"),
+        ))
     }
 
     /// Adopt a freshly-minted, already-signed id from [`crypto::IdSigner`].
@@ -64,26 +72,26 @@ impl RouteId {
     #[must_use]
     pub fn from_signed(id: String) -> Self {
         debug_assert_eq!(id.len(), ID_LEN, "signer must emit {ID_LEN}-char ids");
-        Self(std::sync::Arc::from(id))
+        Self(arrayvec::ArrayString::from(&id).expect("signer emits ID_LEN-char ids"))
     }
 
     /// Borrow the id as a string slice.
     #[must_use]
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 
-    /// Consume the newtype, yielding an owned string. Used only on cold Control
-    /// Plane response paths, never on the Data Plane hot path.
+    /// Yield an owned string. Used only on cold Control Plane response paths,
+    /// never on the Data Plane hot path.
     #[must_use]
     pub fn into_inner(self) -> String {
-        self.0.as_ref().to_owned()
+        self.0.as_str().to_owned()
     }
 }
 
 impl std::fmt::Display for RouteId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(self.0.as_str())
     }
 }
 
