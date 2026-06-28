@@ -18,8 +18,6 @@
 //! Freshness rests entirely on Control Plane invalidation, which requires both
 //! planes to share one cache handle in one process (see [`crate::cache`]).
 
-use std::borrow::Cow;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -32,6 +30,7 @@ use axum::routing::get;
 use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::cache::CachedSnippet;
+use crate::crypto::ID_LEN;
 use crate::db::models::{CacheMode, RouteId};
 use crate::renderer;
 use crate::state::DeliveryState;
@@ -120,16 +119,15 @@ async fn deliver(
     let inm = headers.get(header::IF_NONE_MATCH);
 
     // Immutable shortcut: for content-addressed ids the ETag is just `"<id>"`.
-    // Build the string only when the client sent If-None-Match — skips one
-    // format! per request without a validator (the common cold-cache first load)
-    // and per mutable-route request where the immutable ETag is never relevant.
-    // Carry the string forward into compute_etag to avoid a second format!.
-    let immutable_etag = inm.map(|_| format!("\"{}\"", raw_id));
+    // Compare in bytes, preserving the previous OWS tolerance without building
+    // a temporary String on every conditional request.
     if let Some(v) = inm
-        && let Some(s) = immutable_etag.as_deref()
-        && v.to_str().is_ok_and(|sv| sv.trim() == s)
+        && immutable_etag_matches(v, raw_id)
     {
-        return build_not_modified(str_to_header(s), cache_control_for(CacheMode::Immutable));
+        return build_not_modified(
+            immutable_etag(raw_id),
+            cache_control_for(CacheMode::Immutable),
+        );
     }
 
     // Read-through the cache: a hit returns immediately; concurrent misses are
@@ -161,7 +159,6 @@ async fn deliver(
         &snippet.target_hash,
         raw_query,
         state,
-        immutable_etag.as_deref(),
     );
     if let Some(v) = inm
         && etag_matches(v, &etag)
@@ -198,15 +195,14 @@ fn build_ok(
     query: Option<&str>,
     etag: HeaderValue,
 ) -> Response {
-    let variables = parse_query(query);
-    // `render` returns `Cow::Borrowed` when no substitutions occur — the regex
-    // engine makes zero heap allocations and the content is untouched.
-    // We exploit that: the Borrowed path clones the Arc (two atomics, no memcpy)
-    // and wraps it in `Bytes::from_owner`, giving a truly zero-copy response
-    // body. The Owned path moves the rendered String into Bytes, also zero-copy.
-    let body: Bytes = match renderer::render(&snippet.content, &variables) {
-        Cow::Borrowed(_) => Bytes::from_owner(ArcStr(Arc::clone(&snippet.content))),
-        Cow::Owned(s) => Bytes::from(s),
+    let body: Bytes = match query {
+        Some(query) if !query.is_empty() => match renderer::render_query(&snippet.content, query) {
+            std::borrow::Cow::Borrowed(_) => {
+                Bytes::from_owner(ArcStr(Arc::clone(&snippet.content)))
+            }
+            std::borrow::Cow::Owned(s) => Bytes::from(s),
+        },
+        _ => Bytes::from_owner(ArcStr(Arc::clone(&snippet.content))),
     };
     let content_type = resolve_content_type(filename, &snippet.content_type);
     let cc = cache_control_for(snippet.cache_mode);
@@ -234,7 +230,7 @@ fn build_not_modified(etag: HeaderValue, cache_control: HeaderValue) -> Response
 /// Compute the strong ETag for a delivery response.
 ///
 /// * **Immutable** ids: `"<id>"` — the id itself is the content address.
-/// * **Mutable** routes: `signer.etag(target_hash, raw_query)` — a keyed hash
+/// * **Mutable** routes: `signer.etag_bytes(target_hash, raw_query)` — a keyed hash
 ///   under a key distinct from the route-id MAC, so the serving hash is never
 ///   derivable from the ETag.
 fn compute_etag(
@@ -243,42 +239,53 @@ fn compute_etag(
     target_hash: &str,
     raw_query: &[u8],
     state: &DeliveryState,
-    prebuilt_immutable: Option<&str>,
 ) -> HeaderValue {
     match mode {
-        CacheMode::Immutable => match prebuilt_immutable {
-            Some(s) => str_to_header(s),
-            None => str_to_header(&format!("\"{}\"", raw_id)),
-        },
+        CacheMode::Immutable => immutable_etag(raw_id),
         CacheMode::Mutable => mutable_etag(target_hash, raw_query, state),
     }
 }
 
 /// ETag for a mutable route given its `target_hash` and the raw query bytes.
 fn mutable_etag(target_hash: &str, raw_query: &[u8], state: &DeliveryState) -> HeaderValue {
-    str_to_header(&state.signer.etag(target_hash, raw_query))
+    let etag = state.signer.etag_bytes(target_hash, raw_query);
+    header_from_owned_bytes(etag)
+}
+
+fn immutable_etag(raw_id: &str) -> HeaderValue {
+    let mut etag = [0u8; ID_LEN + 2];
+    etag[0] = b'"';
+    etag[1..ID_LEN + 1].copy_from_slice(raw_id.as_bytes());
+    etag[ID_LEN + 1] = b'"';
+    header_from_owned_bytes(etag)
+}
+
+fn header_from_owned_bytes<const N: usize>(bytes: [u8; N]) -> HeaderValue {
+    HeaderValue::from_maybe_shared(Bytes::from_owner(bytes))
+        .unwrap_or_else(|_| HeaderValue::from_static(""))
+}
+
+fn immutable_etag_matches(inm: &HeaderValue, raw_id: &str) -> bool {
+    let bytes = trim_ows(inm.as_bytes());
+    bytes.len() == ID_LEN + 2
+        && bytes[0] == b'"'
+        && bytes[ID_LEN + 1] == b'"'
+        && &bytes[1..ID_LEN + 1] == raw_id.as_bytes()
+}
+
+fn trim_ows(mut bytes: &[u8]) -> &[u8] {
+    while matches!(bytes.first(), Some(b' ' | b'\t')) {
+        bytes = &bytes[1..];
+    }
+    while matches!(bytes.last(), Some(b' ' | b'\t')) {
+        bytes = &bytes[..bytes.len() - 1];
+    }
+    bytes
 }
 
 /// Returns `true` if the client's `If-None-Match` value matches our ETag.
 fn etag_matches(inm: &HeaderValue, etag: &HeaderValue) -> bool {
     inm.as_bytes() == etag.as_bytes()
-}
-
-/// Parse the query string into template variables. Repeated keys keep the last
-/// value; percent-encoding is decoded. The result is a `HashMap` for O(1)
-/// lookup in the renderer — a linear-scan structure would expose an
-/// O(placeholders × params) work factor exploitable by an attacker who sends
-/// arbitrarily many query parameters.
-///
-/// Keys and values that require no percent-decoding are stored as
-/// `Cow::Borrowed` slices into the query string, avoiding a heap allocation
-/// per parameter on the common clean-key path. Only percent-encoded
-/// characters produce `Cow::Owned` strings.
-fn parse_query(query: Option<&str>) -> HashMap<Cow<'_, str>, Cow<'_, str>> {
-    let Some(query) = query else {
-        return HashMap::new();
-    };
-    form_urlencoded::parse(query.as_bytes()).collect()
 }
 
 /// Resolve the response MIME type: prefer the filename extension, falling back
@@ -292,15 +299,14 @@ fn parse_query(query: Option<&str>) -> HashMap<Cow<'_, str>, Cow<'_, str>> {
 /// loads, form submission and same-origin access from any document. A reflected
 /// `text/html` snippet is therefore already served inert, so no special case is
 /// needed.
-fn resolve_content_type(filename: Option<&str>, stored: &str) -> HeaderValue {
+fn resolve_content_type(filename: Option<&str>, stored: &HeaderValue) -> HeaderValue {
     if let Some(name) = filename
         && let Some(guess) = mime_guess::from_path(name).first()
         && let Ok(value) = HeaderValue::from_str(guess.as_ref())
     {
         return value;
     }
-    HeaderValue::from_str(stored)
-        .unwrap_or_else(|_| HeaderValue::from_static("text/plain; charset=utf-8"))
+    stored.clone()
 }
 
 /// Choose a `Cache-Control` policy.
@@ -319,44 +325,26 @@ fn cache_control_for(mode: CacheMode) -> HeaderValue {
     }
 }
 
-fn str_to_header(s: &str) -> HeaderValue {
-    HeaderValue::from_str(s).unwrap_or_else(|_| HeaderValue::from_static(""))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn parse_query_decodes_and_dedupes() {
-        let vars = parse_query(Some("port=8080&name=hello%20world&port=9090"));
-        assert_eq!(vars.get("name").unwrap().as_ref(), "hello world");
-        assert_eq!(
-            vars.get("port").unwrap().as_ref(),
-            "9090",
-            "last value wins"
-        );
-    }
-
-    #[test]
-    fn parse_query_handles_none_and_empty() {
-        assert!(parse_query(None).is_empty());
-        assert!(parse_query(Some("")).is_empty());
-    }
-
-    #[test]
     fn content_type_prefers_filename_extension() {
-        let ct = resolve_content_type(Some("config.json"), "text/plain; charset=utf-8");
+        let stored = HeaderValue::from_static("text/plain; charset=utf-8");
+        let ct = resolve_content_type(Some("config.json"), &stored);
         assert_eq!(ct.to_str().unwrap(), "application/json");
     }
 
     #[test]
     fn content_type_falls_back_to_stored() {
-        let ct = resolve_content_type(None, "text/plain; charset=utf-8");
+        let stored = HeaderValue::from_static("text/plain; charset=utf-8");
+        let ct = resolve_content_type(None, &stored);
         assert_eq!(ct.to_str().unwrap(), "text/plain; charset=utf-8");
 
         // Unknown extension also falls back to the stored type.
-        let ct = resolve_content_type(Some("file.unknownext"), "text/markdown");
+        let stored = HeaderValue::from_static("text/markdown");
+        let ct = resolve_content_type(Some("file.unknownext"), &stored);
         assert_eq!(ct.to_str().unwrap(), "text/markdown");
     }
 
@@ -365,28 +353,23 @@ mod tests {
         // The blanket `nosniff` + `default-src 'none'; sandbox` headers render
         // any document inert, so the MIME type is no longer rewritten — HTML
         // passes through whether it comes from the filename or the stored type.
-        let ct = resolve_content_type(Some("page.html"), "text/plain; charset=utf-8");
+        let stored = HeaderValue::from_static("text/plain; charset=utf-8");
+        let ct = resolve_content_type(Some("page.html"), &stored);
         assert_eq!(ct.to_str().unwrap(), "text/html");
 
-        let ct = resolve_content_type(None, "text/html; charset=utf-8");
+        let stored = HeaderValue::from_static("text/html; charset=utf-8");
+        let ct = resolve_content_type(None, &stored);
         assert_eq!(ct.to_str().unwrap(), "text/html; charset=utf-8");
     }
 
     #[test]
     fn non_html_types_are_preserved() {
-        let ct = resolve_content_type(Some("data.json"), "text/plain");
+        let stored = HeaderValue::from_static("text/plain");
+        let ct = resolve_content_type(Some("data.json"), &stored);
         assert_eq!(ct.to_str().unwrap(), "application/json");
-        let ct = resolve_content_type(None, "image/svg+xml");
+        let stored = HeaderValue::from_static("image/svg+xml");
+        let ct = resolve_content_type(None, &stored);
         assert_eq!(ct.to_str().unwrap(), "image/svg+xml");
-    }
-
-    #[test]
-    fn unparseable_stored_type_falls_back_to_text() {
-        // A stored value that is not a legal header (e.g. a stray newline)
-        // degrades to inert text, not a binary download — this is a text
-        // snippet service.
-        let ct = resolve_content_type(None, "not\na\nheader");
-        assert_eq!(ct.to_str().unwrap(), "text/plain; charset=utf-8");
     }
 
     #[test]

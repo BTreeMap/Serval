@@ -67,6 +67,14 @@ const KEY_DERIVATION_CONTEXT: &str = "serval route-id mac v1";
 /// an ETag value even if the etag key is somehow exposed.
 const ETAG_KEY_DERIVATION_CONTEXT: &str = "serval delivery etag v1";
 
+const ETAG_ENCODED_LEN: usize = match base64::encoded_len(blake3::OUT_LEN, false) {
+    Some(len) => len,
+    None => panic!("BLAKE3 digest encoded length must fit in usize"),
+};
+
+/// Bytes in a quoted mutable ETag header value: `"` + 43 base64url bytes + `"`.
+pub const ETAG_HEADER_LEN: usize = ETAG_ENCODED_LEN + 2;
+
 /// Mints and verifies signed ids.
 ///
 /// Holds a 32-byte BLAKE3 key derived from the deployment secret. Cloning is
@@ -149,14 +157,28 @@ impl IdSigner {
     /// method.
     #[must_use]
     pub fn etag(&self, target_hash: &str, raw_query: &[u8]) -> String {
+        String::from_utf8(self.etag_bytes(target_hash, raw_query).to_vec())
+            .expect("ETag bytes are ASCII")
+    }
+
+    /// Compute a quoted ETag into a fixed-size byte array suitable for an HTTP
+    /// header value. This is the allocation-free variant used by the Data Plane.
+    #[must_use]
+    pub fn etag_bytes(&self, target_hash: &str, raw_query: &[u8]) -> [u8; ETAG_HEADER_LEN] {
         // Stream both inputs through the hasher instead of heap-allocating a
         // temporary Vec to concatenate them — equivalent output, one fewer alloc.
         let mut hasher = blake3::Hasher::new_keyed(&self.etag_key);
         hasher.update(target_hash.as_bytes());
         hasher.update(raw_query);
         let tag = hasher.finalize();
-        let encoded = URL_SAFE_NO_PAD.encode(tag.as_bytes());
-        format!("\"{}\"", encoded)
+        let mut etag = [0u8; ETAG_HEADER_LEN];
+        etag[0] = b'"';
+        let written = URL_SAFE_NO_PAD
+            .encode_slice(tag.as_bytes(), &mut etag[1..ETAG_HEADER_LEN - 1])
+            .expect("32-byte BLAKE3 digest encodes to 43 base64url bytes");
+        debug_assert_eq!(written, ETAG_ENCODED_LEN);
+        etag[ETAG_HEADER_LEN - 1] = b'"';
+        etag
     }
 
     /// Verify that `id` carries a MAC this signer would produce.
@@ -331,6 +353,18 @@ mod tests {
         assert!(
             tag.starts_with('"') && tag.ends_with('"'),
             "ETag must be double-quoted: {tag}"
+        );
+    }
+
+    #[test]
+    fn etag_bytes_match_string_api() {
+        let s = signer();
+        let hash = s.content_id("payload");
+        let bytes = s.etag_bytes(&hash, b"port=8080");
+        assert_eq!(bytes.len(), ETAG_HEADER_LEN);
+        assert_eq!(
+            std::str::from_utf8(&bytes).unwrap(),
+            s.etag(&hash, b"port=8080")
         );
     }
 

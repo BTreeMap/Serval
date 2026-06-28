@@ -101,6 +101,11 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["postgres"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+divan = "0.1"
+
+[[bench]]
+name = "data_plane_hot_path"
+harness = false
 
 [profile.release]
 lto = "thin"

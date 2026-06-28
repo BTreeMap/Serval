@@ -21,8 +21,9 @@
 //! Two properties keep the hot path cheap under read spikes:
 //!
 //! * **Pointer-sized reads.** The value is an [`Arc<CachedSnippet>`] whose
-//!   content is itself an `Arc<str>`. A cache hit clones two atomics, never the
-//!   20 KiB blob.
+//!   content is itself an `Arc<str>` and whose stored content type is a
+//!   prevalidated header value. A cache hit clones handles, never the 20 KiB
+//!   blob.
 //! * **Stampede coalescing.** [`Cache::get_with`] collapses a thundering herd of
 //!   concurrent misses for the same id into a single database load.
 //!
@@ -31,19 +32,20 @@
 use std::future::Future;
 use std::sync::Arc;
 
+use axum::http::HeaderValue;
 use moka::future::Cache;
 
 use crate::db::models::{CacheMode, DeliveryRecord, RouteId};
 
 /// An immutable, shareable snapshot of everything needed to serve a route.
 ///
-/// The cache stores this behind an `Arc`; cloning the cache entry costs two
-/// atomic-reference increments, never the content bytes. Rendering happens per
-/// request against the borrowed `content`.
+/// The cache stores this behind an `Arc`; cloning the cache entry never copies
+/// the content bytes. Rendering happens per request against the borrowed
+/// `content`.
 #[derive(Debug)]
 pub struct CachedSnippet {
     pub content: Arc<str>,
-    pub content_type: Arc<str>,
+    pub content_type: HeaderValue,
     pub cache_mode: CacheMode,
     /// The content block hash for this version. Used to compute the strong ETag.
     /// Authoritative while cached: a Control Plane write invalidates the entry,
@@ -58,7 +60,8 @@ impl CachedSnippet {
     /// exactly 64 chars), so only the variable-length fields are measured.
     fn weight(&self) -> u32 {
         const OVERHEAD: usize = 224;
-        (self.content.len() + self.content_type.len() + OVERHEAD).min(u32::MAX as usize) as u32
+        (self.content.len() + self.content_type.as_bytes().len() + OVERHEAD).min(u32::MAX as usize)
+            as u32
     }
 }
 
@@ -66,11 +69,16 @@ impl From<DeliveryRecord> for CachedSnippet {
     fn from(record: DeliveryRecord) -> Self {
         Self {
             content: Arc::from(record.content),
-            content_type: Arc::from(record.content_type),
+            content_type: content_type_header(&record.content_type),
             cache_mode: record.cache_mode,
             target_hash: Arc::from(record.target_hash),
         }
     }
+}
+
+fn content_type_header(content_type: &str) -> HeaderValue {
+    HeaderValue::from_str(content_type)
+        .unwrap_or_else(|_| HeaderValue::from_static("text/plain; charset=utf-8"))
 }
 
 /// The shared, byte-bounded delivery cache. Cheap to clone (`Arc` inside moka).
@@ -152,7 +160,7 @@ mod tests {
     fn snippet(content: &str, mode: CacheMode) -> CachedSnippet {
         CachedSnippet {
             content: Arc::from(content),
-            content_type: Arc::from("text/plain; charset=utf-8"),
+            content_type: HeaderValue::from_static("text/plain; charset=utf-8"),
             cache_mode: mode,
             target_hash: Arc::from("a".repeat(64)),
         }
@@ -266,6 +274,21 @@ mod tests {
             cache.entry_count().await < 10,
             "weight bound must evict; got {}",
             cache.entry_count().await
+        );
+    }
+
+    #[test]
+    fn invalid_content_type_falls_back_when_cached() {
+        let snippet = CachedSnippet::from(DeliveryRecord {
+            content: "payload".to_owned(),
+            content_type: "not\na\nheader".to_owned(),
+            cache_mode: CacheMode::Mutable,
+            target_hash: "a".repeat(64),
+        });
+
+        assert_eq!(
+            snippet.content_type.to_str().unwrap(),
+            "text/plain; charset=utf-8"
         );
     }
 }

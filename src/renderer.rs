@@ -32,6 +32,40 @@ impl Replacer for DictReplacer<'_, '_> {
     }
 }
 
+/// A [`Replacer`] that parses the query string lazily on the first placeholder
+/// match. Placeholder-free templates therefore scan once and never pay query
+/// parsing, while templates with placeholders still scan only once.
+struct QueryReplacer<'q> {
+    query: &'q str,
+    variables: Option<HashMap<Cow<'q, str>, Cow<'q, str>>>,
+}
+
+impl<'q> QueryReplacer<'q> {
+    fn new(query: &'q str) -> Self {
+        Self {
+            query,
+            variables: None,
+        }
+    }
+
+    fn variables(&mut self) -> &HashMap<Cow<'q, str>, Cow<'q, str>> {
+        if self.variables.is_none() {
+            self.variables = Some(form_urlencoded::parse(self.query.as_bytes()).collect());
+        }
+        self.variables.as_ref().expect("variables just initialized")
+    }
+}
+
+impl Replacer for QueryReplacer<'_> {
+    fn replace_append(&mut self, caps: &Captures<'_>, dst: &mut String) {
+        let key = &caps[1];
+        match self.variables().get(key) {
+            Some(value) => dst.push_str(value.as_ref()),
+            None => dst.push_str(&caps[0]),
+        }
+    }
+}
+
 /// Render `template`, replacing every `{{key}}` whose `key` is present in
 /// `variables` with the corresponding value. Unmatched placeholders are emitted
 /// unchanged as literal text.
@@ -48,6 +82,13 @@ pub fn render<'a>(
     variables: &HashMap<Cow<'_, str>, Cow<'_, str>>,
 ) -> Cow<'a, str> {
     PLACEHOLDER.replace_all(template, DictReplacer(variables))
+}
+
+/// Render `template` against the raw query string, parsing the query lazily only
+/// if the renderer sees a placeholder.
+#[must_use]
+pub fn render_query<'a>(template: &'a str, query: &str) -> Cow<'a, str> {
+    PLACEHOLDER.replace_all(template, QueryReplacer::new(query))
 }
 
 #[cfg(test)]
@@ -97,5 +138,20 @@ mod tests {
     fn passes_through_text_without_placeholders() {
         let out = render("plain text, no braces", &vars(&[("x", "1")]));
         assert_eq!(out, "plain text, no braces");
+    }
+
+    #[test]
+    fn render_query_decodes_and_dedupes() {
+        let out = render_query(
+            "{{name}} on {{port}}",
+            "port=8080&name=hello%20world&port=9090",
+        );
+        assert_eq!(out, "hello world on 9090");
+    }
+
+    #[test]
+    fn render_query_leaves_unknown_keys_literal() {
+        let out = render_query("{{uuid}} on {{port}}", "port=8080");
+        assert_eq!(out, "{{uuid}} on 8080");
     }
 }
