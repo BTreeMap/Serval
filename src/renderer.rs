@@ -10,11 +10,27 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-use regex::{Captures, Regex};
+use regex::{Captures, Regex, Replacer};
 
 /// Compiled once, reused for the lifetime of the process.
 static PLACEHOLDER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\{\{([a-zA-Z0-9_]+)\}\}").expect("placeholder regex is valid"));
+
+/// A [`Replacer`] that writes substituted values directly into the output
+/// buffer via [`Replacer::replace_append`], avoiding the intermediate `String`
+/// that the closure form of `Replacer` must return per match.
+struct DictReplacer<'r, 'v>(&'r HashMap<Cow<'v, str>, Cow<'v, str>>);
+
+impl Replacer for DictReplacer<'_, '_> {
+    fn replace_append(&mut self, caps: &Captures<'_>, dst: &mut String) {
+        let key = &caps[1];
+        match self.0.get(key) {
+            Some(value) => dst.push_str(value.as_ref()),
+            // Leave the original `{{key}}` literally in place.
+            None => dst.push_str(&caps[0]),
+        }
+    }
+}
 
 /// Render `template`, replacing every `{{key}}` whose `key` is present in
 /// `variables` with the corresponding value. Unmatched placeholders are emitted
@@ -31,14 +47,7 @@ pub fn render<'a>(
     template: &'a str,
     variables: &HashMap<Cow<'_, str>, Cow<'_, str>>,
 ) -> Cow<'a, str> {
-    PLACEHOLDER.replace_all(template, |caps: &Captures<'_>| {
-        let key = &caps[1];
-        match variables.get(key) {
-            Some(value) => value.as_ref().to_owned(),
-            // Leave the original `{{key}}` literally in place.
-            None => caps[0].to_string(),
-        }
-    })
+    PLACEHOLDER.replace_all(template, DictReplacer(variables))
 }
 
 #[cfg(test)]
