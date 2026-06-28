@@ -163,7 +163,7 @@ pub struct DeliveryRecord {
 /// `content_type` fallback plus the optional human-readable title and
 /// description. Grouped as one value so every metadata-bearing row shape
 /// declares the set once instead of repeating the three fields.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct RouteAnnotations {
     pub content_type: String,
     pub title: Option<String>,
