@@ -1,0 +1,73 @@
+name: Performance Harness
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * *"
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "Cargo.toml"
+      - ".github/workflows/performance-harness.yml"
+
+concurrency:
+  group: performance-harness-${{ github.ref }}
+  cancel-in-progress: true
+
+# Deny-all token default. This workflow only reads repository contents and
+# uploads benchmark artifacts produced in-run.
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  performance:
+    name: Extreme-load performance harness
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: performance-harness
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Run performance harness
+        run: cargo test --release --features integration --test performance_harness -- --ignored --nocapture
+        env:
+          SERVAL_SKIP_FRONTEND_BUILD: "1"
+          PERF_RESULTS_PATH: target/performance-harness-report.json
+          PERF_PEAK_CONCURRENCY: "96"
+          PERF_PEAK_DURATION_SECS: "15"
+          PERF_ADVERSARIAL_LEGIT_CONCURRENCY: "36"
+          PERF_ADVERSARIAL_FORGED_CONCURRENCY: "72"
+          PERF_ADVERSARIAL_DURATION_SECS: "15"
+          PERF_ADVERSARIAL_WRITER_INTERVAL_MS: "80"
+          PERF_ASSERT_PEAK_P95_MS: "350"
+          PERF_ASSERT_PEAK_MIN_RPS: "350"
+          PERF_ASSERT_PEAK_MAX_ERROR_PCT: "2"
+          PERF_ASSERT_ADVERSARIAL_P95_MS: "450"
+          PERF_ASSERT_ADVERSARIAL_MIN_RPS: "120"
+          PERF_ASSERT_ADVERSARIAL_MAX_ERROR_PCT: "5"
+          PERF_ASSERT_FORGED_REJECTION_PCT: "99"
+
+      - name: Upload performance report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: performance-harness-report
+          path: target/performance-harness-report.json
+          if-no-files-found: warn

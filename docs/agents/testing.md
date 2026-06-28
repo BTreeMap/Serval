@@ -42,11 +42,35 @@ cargo test --test '*'
 |---|---|
 | `pr-quality-gate.yml` | `cargo fmt`, `clippy`, and UI linting |
 | `integration-tests.yml` | Boots ephemeral PostgreSQL 16+, builds the binary, runs E2E Bash tests for routing, invalidation, and headers |
+| `performance-harness.yml` | Runs an extreme-load harness (peak traffic + adversarial forged-id flood + concurrent writers), enforces latency/throughput/error-rate SLO assertions, and uploads a JSON report artifact |
 | `build-binaries.yml` | Cross-compiles for Linux/macOS/Windows |
 | `docker-publish.yml` | Builds minimal `distroless`/`scratch` OCI images |
 
 Do not edit these workflows unless explicitly asked. CI checkouts must pass
 `submodules: recursive` so the `.github/skills` submodule is present.
+
+## Performance harness
+
+The repository ships a dedicated heavy-load harness at
+`tests/performance_harness.rs` (feature-gated with `integration` and ignored by
+default so it does not impact standard local `cargo test` runs).
+
+It validates two traffic classes:
+
+1. **Peak traffic profile.** Sustained, high-concurrency legitimate GETs to
+   the Data Plane with realistic query substitutions.
+2. **Misaligned actor profile.** Concurrent legitimate reads while forged-id
+   floods and rapid Control Plane writes run in parallel.
+
+Run locally with the same command CI uses:
+
+```bash
+cargo test --release --features integration --test performance_harness -- --ignored --nocapture
+```
+
+Tune load and assertion thresholds via `PERF_*` environment variables (see the
+workflow for the canonical set). The harness writes
+`target/performance-harness-report.json` by default.
 
 ## Acceptance criteria
 
