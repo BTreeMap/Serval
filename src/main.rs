@@ -10,7 +10,7 @@ use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tokio::signal;
 
-use serval::auth::AuthService;
+use serval::auth::{AuthConfig, AuthService};
 use serval::cache::DeliveryCache;
 use serval::config::Config;
 use serval::crypto;
@@ -71,6 +71,9 @@ async fn main() -> Result<()> {
 }
 /// Boot both planes and run until a shutdown signal arrives.
 async fn serve(config: Config, repo: Repository) -> Result<()> {
+    // Log every non-secret setting before any field is consumed so operators
+    // can confirm the active configuration from a single log bundle.
+    log_startup_config(&config);
     // One cache handle is shared by both planes: a Control Plane write evicts
     // exactly what a Data Plane read would load.
     let cache = DeliveryCache::new(config.cache_byte_budget);
@@ -124,12 +127,7 @@ async fn serve(config: Config, repo: Repository) -> Result<()> {
     let delivery_addr: SocketAddr = config.data_plane_addr;
     let delivery_listeners = bind_delivery_listeners(delivery_addr)?;
 
-    tracing::info!(
-        control_plane = %config.control_plane_addr,
-        data_plane = %config.data_plane_addr,
-        delivery_listeners = delivery_listeners.len(),
-        "serval is listening"
-    );
+    tracing::info!("serval is listening");
 
     let control = axum::serve(control_listener, control_app)
         .with_graceful_shutdown(shutdown_signal("control plane"));
@@ -229,6 +227,65 @@ fn bind_delivery_listeners(addr: SocketAddr) -> Result<Vec<TcpListener>> {
             TcpListener::from_std(std_listener)
                 .context("failed to create tokio delivery listener")?,
         ])
+    }
+}
+
+/// Log all non-secret configuration fields before any are consumed.
+///
+/// Secrets (`DATABASE_URL`, `ID_SIGNING_SECRET`) are deliberately omitted.
+/// Every setting that has a non-obvious default, or that silently degrades
+/// security when left at its default, is logged at `WARN` level; everything
+/// else is `INFO`.
+fn log_startup_config(config: &Config) {
+    // ── Network ─────────────────────────────────────────────────────────
+    tracing::info!(
+        control_plane = %config.control_plane_addr,
+        data_plane    = %config.data_plane_addr,
+        "network addresses"
+    );
+
+    match &config.data_plane_url {
+        Some(url) => tracing::info!(url = %url, "data plane public URL"),
+        None => tracing::warn!(
+            "DATA_PLANE_PUBLIC_URL unset — dashboard will infer data plane \
+             origin from browser location (fine for same-host deployments)"
+        ),
+    }
+
+    // ── Database ─────────────────────────────────────────────────────────
+    tracing::info!(
+        max_connections = config.database_max_connections,
+        "database pool"
+    );
+
+    // ── Cache ────────────────────────────────────────────────────────────
+    let budget_mib = config.cache_byte_budget / (1024 * 1024);
+    tracing::info!(
+        byte_budget = config.cache_byte_budget,
+        budget_mib = budget_mib,
+        "delivery cache"
+    );
+
+    // ── Auth ─────────────────────────────────────────────────────────────
+    match &config.auth {
+        AuthConfig::None => tracing::warn!(
+            "auth=none: all requests are trusted as a dev superuser; \
+             never use this mode in production"
+        ),
+        AuthConfig::Oauth(s) => tracing::info!(
+            issuer             = %s.issuer,
+            audience           = %s.audience,
+            scopes             = %s.scopes,
+            jwks_url           = %s.jwks_url,
+            jwks_cache_ttl_s   = s.jwks_cache_ttl.as_secs(),
+            "auth=oauth"
+        ),
+        AuthConfig::Cloudflare(s) => tracing::info!(
+            team_domain        = %s.team_domain,
+            audience           = %s.audience,
+            certs_cache_ttl_s  = s.certs_cache_ttl.as_secs(),
+            "auth=cloudflare"
+        ),
     }
 }
 
