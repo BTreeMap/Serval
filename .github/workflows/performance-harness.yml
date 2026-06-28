@@ -51,20 +51,62 @@ jobs:
 
       - name: Tune kernel for high-concurrency sockets
         run: |
-          # Expand the ephemeral port range so 25K+ concurrent outbound
-          # connections don't exhaust the default ~28K ports (32768–60999).
+          # ── File descriptors ────────────────────────────────────────────────
+          # Each TCP connection consumes one fd. At c25733 the harness needs
+          # 25K+ fds in a single process. The GitHub Actions default (1048576)
+          # is usually sufficient, but make it explicit so the number is
+          # documented and not subject to runner image variation.
+          ulimit -n 1048576
+
+          # ── Port range & TIME_WAIT pool ──────────────────────────────────────
+          # Expand ephemeral ports from ~28K (32768–60999) to ~64K so that
+          # 25K+ simultaneous outbound connections never exhaust the pool.
           sudo sysctl -w net.ipv4.ip_local_port_range="1024 65535"
-          # Allow TIME_WAIT sockets to be reused for new outbound connections
-          # when a sequence-number safe timestamp is present. This prevents
-          # port exhaustion from accumulated TIME_WAIT sockets between stages.
+          # Allow TIME_WAIT sockets to be reused when tcp_timestamps is on
+          # (default). Prevents port exhaustion from accumulated TIME_WAIT
+          # sockets between stages.
           sudo sysctl -w net.ipv4.tcp_tw_reuse=1
-          # Shorten FIN_WAIT2 timeout so closed connections drain faster between
-          # stages (default 60s; 15s is safe for loopback-only test traffic).
+          # Increase the TIME_WAIT bucket count (default 131072) so the kernel
+          # keeps TIME_WAIT state properly rather than silently destroying
+          # sockets and making RST responses look like transport errors.
+          sudo sysctl -w net.ipv4.tcp_max_tw_buckets=2000000
+          # Drain FIN_WAIT2 sockets faster between stages (default 60s;
+          # 15s is safe for loopback-only test traffic).
           sudo sysctl -w net.ipv4.tcp_fin_timeout=15
-          # Increase the listen backlog ceiling to match the delivery server's
-          # backlog, preventing SYN drops under burst connection storms.
+
+          # ── Listen backlog ───────────────────────────────────────────────────
+          # Raise the kernel ceiling to match the backlog the delivery server
+          # requests, so SYNs are not dropped at the kernel queue before hyper
+          # sees them during burst connection storms.
           sudo sysctl -w net.core.somaxconn=65535
           sudo sysctl -w net.ipv4.tcp_max_syn_backlog=65535
+          # Increase the per-interface receive queue so packets are not dropped
+          # when NIC (loopback) delivers faster than the kernel can process.
+          sudo sysctl -w net.core.netdev_max_backlog=65535
+
+          # ── Socket buffer sizes ──────────────────────────────────────────────
+          # Raise the ceiling for socket read/write buffers (default 212992 B).
+          # The kernel autotuner (tcp_rmem/tcp_wmem) stays within this ceiling;
+          # without raising it, high-throughput loopback connections cannot grow
+          # their windows enough to fully saturate the pipe.
+          sudo sysctl -w net.core.rmem_max=134217728
+          sudo sysctl -w net.core.wmem_max=134217728
+          # TCP buffer autotuning bounds: min / default / max.
+          # max matches the ceiling above; default is kept modest to avoid
+          # wasting memory on idle connections.
+          sudo sysctl -w net.ipv4.tcp_rmem="4096 131072 134217728"
+          sudo sysctl -w net.ipv4.tcp_wmem="4096 131072 134217728"
+
+          # ── Congestion control & idle behaviour ──────────────────────────────
+          # Don't reduce the congestion window after an idle period. Between
+          # stages the load generators are idle for a brief moment; without
+          # this, TCP slow-start fires at the beginning of each stage and
+          # inflates early-stage latency, biasing p50/p95 upward.
+          sudo sysctl -w net.ipv4.tcp_slow_start_after_idle=0
+          # Enable TCP Fast Open for both client (1) and server (2) sides.
+          # Eliminates the SYN round-trip for repeated connections to the same
+          # address, which is exactly the pattern the harness creates.
+          sudo sysctl -w net.ipv4.tcp_fastopen=3
 
       - name: Run performance harness
         run: cargo test --release --features integration --test performance_harness -- --ignored --nocapture
