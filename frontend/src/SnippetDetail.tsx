@@ -181,7 +181,7 @@ function ContentTypeEditor({
         variant="link"
         size="sm"
         onClick={open}
-        className="min-h-0 px-0 py-0 font-mono"
+        className="font-mono"
         title="Edit content type"
       >
         {value}
@@ -294,7 +294,7 @@ function HistoryList({
                     size="sm"
                   />
                   <Button
-                    variant="ghost"
+                    variant="secondary"
                     size="sm"
                     onClick={() => void view(entry.target_hash)}
                   >

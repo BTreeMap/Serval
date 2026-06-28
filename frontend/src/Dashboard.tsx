@@ -105,7 +105,7 @@ function SnippetRow({ snippet }: { snippet: SnippetSummary }) {
         <div className="flex shrink-0 items-center gap-2">
           <CopyButton value={deliveryUrl(snippet.id)} label="Copy link" size="sm" />
           <Link to={`/s/${snippet.id}`}>
-            <Button variant="ghost" size="sm">
+            <Button variant="secondary" size="sm">
               Details
             </Button>
           </Link>
