@@ -7,7 +7,8 @@ import {
   type HistoryItem,
   type SnippetDetail as Detail,
 } from "./api";
-import { Badge, Banner, Button, Card, CopyButton, Icons, Loading, Textarea } from "./ui";
+import { Badge, Banner, Button, Card, Combobox, CopyButton, Icons, Loading, Textarea } from "./ui";
+import { COMMON_CONTENT_TYPES } from "./content-types";
 
 /** Detail view for one snippet: metadata, an editor, and the append-only
  *  version ledger with per-version preview and restore. */
@@ -61,7 +62,11 @@ export function SnippetDetail() {
           </code>
         </div>
         <div className="flex flex-wrap items-center gap-2 text-xs text-ink-soft">
-          <span>{detail.content_type}</span>
+          <ContentTypeEditor
+            id={detail.id}
+            value={detail.content_type}
+            onUpdated={() => void refresh()}
+          />
           <span aria-hidden>·</span>
           <span>{detail.history_count} version(s)</span>
         </div>
@@ -98,7 +103,7 @@ function Editor({ id, onUpdated }: { id: string; onUpdated: () => void }) {
     setBusy(true);
     setError(null);
     try {
-      await api.updateSnippet(id, content);
+      await api.updateSnippet(id, { content });
       setContent("");
       onUpdated();
     } catch (err) {
@@ -125,6 +130,85 @@ function Editor({ id, onUpdated }: { id: string; onUpdated: () => void }) {
         </Button>
       </form>
     </Card>
+  );
+}
+
+/** Inline editor for a snippet's stored `content_type`. Changing it is pure
+ *  route metadata — it appends no version to the history ledger. */
+function ContentTypeEditor({
+  id,
+  value,
+  onUpdated,
+}: {
+  id: string;
+  value: string;
+  onUpdated: () => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const open = () => {
+    setDraft(value);
+    setError(null);
+    setEditing(true);
+  };
+
+  const save = async () => {
+    const next = draft.trim();
+    if (!next || next === value) {
+      setEditing(false);
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await api.updateSnippet(id, { content_type: next });
+      setEditing(false);
+      onUpdated();
+    } catch (err) {
+      setError(messageOf(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!editing) {
+    return (
+      <button
+        type="button"
+        onClick={open}
+        className="rounded font-mono text-xs text-ink-soft underline decoration-dotted underline-offset-2 hover:text-wisteria-deep focus:outline-none focus-visible:ring-2 focus-visible:ring-wisteria/50"
+        title="Edit content type"
+      >
+        {value}
+      </button>
+    );
+  }
+
+  return (
+    <span className="flex flex-wrap items-center gap-2">
+      <Combobox
+        value={draft}
+        onChange={setDraft}
+        options={COMMON_CONTENT_TYPES}
+        placeholder="content type"
+        className="w-64"
+      />
+      <Button size="sm" loading={busy} onClick={() => void save()}>
+        {busy ? "Saving…" : "Save"}
+      </Button>
+      <Button
+        variant="ghost"
+        size="sm"
+        onClick={() => setEditing(false)}
+        disabled={busy}
+      >
+        Cancel
+      </Button>
+      {error && <Banner tone="error">{error}</Banner>}
+    </span>
   );
 }
 

@@ -4,7 +4,7 @@ import { Badge, Button, Icons } from "./ui";
 
 /** The app shell: top bar with identity and sign-out, plus routed content. */
 export function Layout({ children }: { children: React.ReactNode }) {
-    const { me, signOut } = useAuth();
+    const { me, mode, signOut } = useAuth();
 
     return (
         <div className="min-h-full bg-canvas text-ink">
@@ -23,10 +23,12 @@ export function Layout({ children }: { children: React.ReactNode }) {
                                 {me.user_id}
                             </span>
                             {me.is_admin && <Badge tone="wisteria">admin</Badge>}
-                            <Button variant="ghost" size="sm" onClick={signOut}>
-                                <Icons.LogOut className="h-4 w-4" aria-hidden />
-                                <span className="hidden sm:inline">Sign out</span>
-                            </Button>
+                            {mode === "oauth" && (
+                                <Button variant="ghost" size="sm" onClick={signOut}>
+                                    <Icons.LogOut className="h-4 w-4" aria-hidden />
+                                    <span className="hidden sm:inline">Sign out</span>
+                                </Button>
+                            )}
                         </div>
                     )}
                 </div>

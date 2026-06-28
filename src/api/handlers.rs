@@ -31,9 +31,16 @@ pub struct CreateRequest {
 }
 
 /// Request body for updating a snippet.
+///
+/// A partial update: supply `content` to repoint the route at a new version,
+/// `content_type` to change its stored presentation metadata, or both. At least
+/// one field must be present.
 #[derive(Debug, Deserialize)]
 pub struct UpdateRequest {
-    pub content: String,
+    #[serde(default)]
+    pub content: Option<String>,
+    #[serde(default)]
+    pub content_type: Option<String>,
 }
 
 /// Request body for restoring a snippet to one of its earlier versions.
@@ -187,7 +194,8 @@ pub async fn create_snippet(
     ))
 }
 
-/// `PATCH /api/snippets/{id}` — repoint a snippet at new content.
+/// `PATCH /api/snippets/{id}` — repoint a snippet at new content and/or change
+/// its stored presentation metadata. At least one field must be present.
 pub async fn update_snippet(
     State(state): State<ControlState>,
     caller: Caller,
@@ -204,25 +212,48 @@ pub async fn update_snippet(
 
     authorize_write(&caller, meta.owner_id.as_deref())?;
 
-    let updated = state
-        .repo
-        .update_route(
-            &id,
-            &ContentHash::from_signed(state.signer.content_id(&req.content)),
-            &req.content,
-            &caller.user_id,
-        )
-        .await?;
-    if !updated {
-        return Err(ApiError::NotFound);
+    // A partial update must change something.
+    if req.content.is_none() && req.content_type.is_none() {
+        return Err(ApiError::BadRequest(
+            "update must set content or content_type".to_owned(),
+        ));
     }
+
+    // Repoint at new content first, appending one history row for the version.
+    if let Some(content) = req.content.as_deref() {
+        let updated = state
+            .repo
+            .update_route(
+                &id,
+                &ContentHash::from_signed(state.signer.content_id(content)),
+                content,
+                &caller.user_id,
+            )
+            .await?;
+        if !updated {
+            return Err(ApiError::NotFound);
+        }
+    }
+
+    // Presentation metadata is not a content version, so changing it records no
+    // history entry.
+    let content_type = match req.content_type {
+        Some(requested) => {
+            let normalized = normalize_content_type(Some(requested))?;
+            if !state.repo.set_content_type(&id, &normalized).await? {
+                return Err(ApiError::NotFound);
+            }
+            normalized
+        }
+        None => meta.content_type,
+    };
 
     // Cross-thread invalidation: the next Data Plane GET must see new content.
     state.cache.invalidate(&id).await;
 
     Ok(Json(SnippetResponse {
         id: id.into_inner(),
-        content_type: meta.content_type,
+        content_type,
         owner_id: meta.owner_id,
     }))
 }

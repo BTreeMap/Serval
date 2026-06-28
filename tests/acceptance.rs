@@ -128,6 +128,22 @@ impl Harness {
         );
     }
 
+    /// `PATCH /api/snippets/{id}` changing only the stored `content_type`.
+    async fn update_content_type(&self, id: &str, content_type: &str) {
+        let resp = self
+            .client
+            .patch(format!("{}/api/snippets/{id}", self.control_base))
+            .json(&json!({ "content_type": content_type }))
+            .send()
+            .await
+            .expect("content-type update request");
+        assert!(
+            resp.status().is_success(),
+            "content-type update failed: {}",
+            resp.status()
+        );
+    }
+
     /// `GET /api/snippets/{id}`, returning the detail JSON body.
     async fn detail(&self, id: &str) -> Value {
         let resp = self
@@ -397,5 +413,43 @@ async fn infinite_ledger() {
         detail["history_count"].as_u64(),
         Some(101),
         "ledger must retain every version"
+    );
+}
+
+/// A `content_type`-only update is pure route metadata: it changes the stored
+/// MIME, takes effect on the next Data Plane GET (cache evicted), and records no
+/// new history row — the version ledger tracks content, not presentation.
+#[tokio::test]
+async fn content_type_update_is_metadata_only() {
+    let h = Harness::start().await;
+
+    let created = h.create(json!({ "content": "{ \"k\": 1 }" })).await;
+    let id = created["id"].as_str().expect("id").to_owned();
+
+    // Warm the Data Plane cache with the default text/plain type.
+    let (_, headers) = h.deliver(&id).await;
+    assert_eq!(
+        headers.get("content-type").and_then(|v| v.to_str().ok()),
+        Some("text/plain; charset=utf-8"),
+        "default stored content type should serve verbatim"
+    );
+
+    // Repoint only the content type — no content field.
+    h.update_content_type(&id, "application/json").await;
+
+    // The metadata is reflected on the route and on the very next read.
+    let detail = h.detail(&id).await;
+    assert_eq!(detail["content_type"], json!("application/json"));
+    assert_eq!(
+        detail["history_count"].as_u64(),
+        Some(1),
+        "changing content type must not append a version"
+    );
+
+    let (_, headers) = h.deliver(&id).await;
+    assert_eq!(
+        headers.get("content-type").and_then(|v| v.to_str().ok()),
+        Some("application/json"),
+        "cache was not evicted on a content-type update"
     );
 }

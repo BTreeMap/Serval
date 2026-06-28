@@ -129,6 +129,27 @@ impl Repository {
         Ok(true)
     }
 
+    /// Update only a route's presentation metadata — its stored `content_type`
+    /// fallback — without touching the content pointer or the history ledger.
+    ///
+    /// `content_type` is metadata on the mutable route, not a content version,
+    /// so this records no `pointer_history` row. Returns `Ok(false)` if the
+    /// route does not exist.
+    pub async fn set_content_type(
+        &self,
+        id: &RouteId,
+        content_type: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let updated = sqlx::query("UPDATE routes SET content_type = $2 WHERE id = $1")
+            .bind(id.as_str())
+            .bind(content_type)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+
+        Ok(updated != 0)
+    }
+
     /// The Data Plane read path, resolved in a single round trip.
     ///
     /// A verified id resolves one of two disjoint ways, written as two

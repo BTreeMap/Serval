@@ -64,6 +64,13 @@ export interface CreateRequest {
     content_type?: string;
 }
 
+/** Payload for a partial snippet update: repoint at new `content`, change the
+ *  stored `content_type`, or both. At least one field must be present. */
+export interface UpdateRequest {
+    content?: string;
+    content_type?: string;
+}
+
 /** A typed error carrying the HTTP status for caller-side branching. */
 export class ApiError extends Error {
     readonly status: number;
@@ -159,10 +166,10 @@ export const api = {
         return request<SnippetDetail>(`/api/snippets/${encodeURIComponent(id)}`);
     },
 
-    updateSnippet(id: string, content: string): Promise<SnippetResponse> {
+    updateSnippet(id: string, update: UpdateRequest): Promise<SnippetResponse> {
         return request<SnippetResponse>(`/api/snippets/${encodeURIComponent(id)}`, {
             method: "PATCH",
-            json: { content },
+            json: update,
         });
     },
 
