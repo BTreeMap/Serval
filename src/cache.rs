@@ -21,9 +21,8 @@
 //! Two properties keep the hot path cheap under read spikes:
 //!
 //! * **Pointer-sized reads.** The value is an [`Arc<CachedSnippet>`] whose
-//!   content is itself an `Arc<str>` and whose stored content type is a
-//!   prevalidated header value. A cache hit clones handles, never the 20 KiB
-//!   blob.
+//!   stored content type is a prevalidated header value. A cache hit clones
+//!   handles, never the 20 KiB blob.
 //! * **Stampede coalescing.** [`Cache::get_with`] collapses a thundering herd of
 //!   concurrent misses for the same id into a single database load.
 //!
@@ -44,13 +43,13 @@ use crate::db::models::{CacheMode, DeliveryRecord, RouteId};
 /// `content`.
 #[derive(Debug)]
 pub struct CachedSnippet {
-    pub content: Arc<str>,
+    pub content: Box<str>,
     pub content_type: HeaderValue,
     pub cache_mode: CacheMode,
     /// The content block hash for this version. Used to compute the strong ETag.
     /// Authoritative while cached: a Control Plane write invalidates the entry,
     /// so a present entry always carries the current hash.
-    pub target_hash: Arc<str>,
+    pub target_hash: Box<str>,
 }
 
 impl CachedSnippet {
@@ -68,10 +67,10 @@ impl CachedSnippet {
 impl From<DeliveryRecord> for CachedSnippet {
     fn from(record: DeliveryRecord) -> Self {
         Self {
-            content: Arc::from(record.content),
+            content: record.content.into_boxed_str(),
             content_type: content_type_header(&record.content_type),
             cache_mode: record.cache_mode,
-            target_hash: Arc::from(record.target_hash),
+            target_hash: record.target_hash.into_boxed_str(),
         }
     }
 }
@@ -159,10 +158,10 @@ mod tests {
 
     fn snippet(content: &str, mode: CacheMode) -> CachedSnippet {
         CachedSnippet {
-            content: Arc::from(content),
+            content: Box::from(content),
             content_type: HeaderValue::from_static("text/plain; charset=utf-8"),
             cache_mode: mode,
-            target_hash: Arc::from("a".repeat(64)),
+            target_hash: "a".repeat(64).into_boxed_str(),
         }
     }
 

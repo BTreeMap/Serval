@@ -165,7 +165,7 @@ async fn deliver(
     {
         return build_not_modified(etag, cache_control_for(snippet.cache_mode));
     }
-    build_ok(&snippet, filename, query, etag)
+    build_ok(snippet, filename, query, etag)
 }
 
 /// Map a load failure to a response, logging only genuine database errors.
@@ -179,18 +179,19 @@ fn load_error_response(err: &Arc<LoadError>) -> Response {
     }
 }
 
-/// A newtype that lets an `Arc<str>` be wrapped in `bytes::Bytes::from_owner`,
-/// giving a zero-copy `Bytes` view over content already on the heap.
-struct ArcStr(Arc<str>);
-impl AsRef<[u8]> for ArcStr {
+/// A newtype that lets an `Arc<CachedSnippet>` be wrapped in
+/// `bytes::Bytes::from_owner`, giving a zero-copy `Bytes` view over content
+/// already on the heap.
+struct CachedSnippetBody(Arc<CachedSnippet>);
+impl AsRef<[u8]> for CachedSnippetBody {
     fn as_ref(&self) -> &[u8] {
-        self.0.as_bytes()
+        self.0.content.as_bytes()
     }
 }
 
 /// Build a `200 OK` response rendering the snippet against the query variables.
 fn build_ok(
-    snippet: &CachedSnippet,
+    snippet: Arc<CachedSnippet>,
     filename: Option<&str>,
     query: Option<&str>,
     etag: HeaderValue,
@@ -198,11 +199,11 @@ fn build_ok(
     let body: Bytes = match query {
         Some(query) if !query.is_empty() => match renderer::render_query(&snippet.content, query) {
             std::borrow::Cow::Borrowed(_) => {
-                Bytes::from_owner(ArcStr(Arc::clone(&snippet.content)))
+                Bytes::from_owner(CachedSnippetBody(Arc::clone(&snippet)))
             }
             std::borrow::Cow::Owned(s) => Bytes::from(s),
         },
-        _ => Bytes::from_owner(ArcStr(Arc::clone(&snippet.content))),
+        _ => Bytes::from_owner(CachedSnippetBody(Arc::clone(&snippet))),
     };
     let content_type = resolve_content_type(filename, &snippet.content_type);
     let cc = cache_control_for(snippet.cache_mode);
