@@ -137,7 +137,10 @@ impl IdSigner {
     /// Compute a strong ETag value for a mutable route's current version.
     ///
     /// The tag is `base64url(BLAKE3::keyed_hash(etag_key, target_hash_bytes ||
-    /// raw_query)[..16])` wrapped in RFC 9110 double-quotes, e.g. `"Fg3xkP9…"`.
+    /// raw_query))` wrapped in RFC 9110 double-quotes, e.g. `"Fg3xkP9…"`. The
+    /// full 256-bit keyed hash is used: unlike the route-id MAC (truncated to
+    /// fit the fixed 64-char id format), an ETag is an opaque validator with no
+    /// length constraint, so there is no reason to discard hash bits.
     /// The `etag_key` is derived under a context string distinct from the
     /// route-id MAC key, so the permanent content-serving hash is never exposed.
     ///
@@ -150,7 +153,7 @@ impl IdSigner {
         message.extend_from_slice(target_hash.as_bytes());
         message.extend_from_slice(raw_query);
         let tag = blake3::keyed_hash(&self.etag_key, &message);
-        let encoded = URL_SAFE_NO_PAD.encode(&tag.as_bytes()[..16]);
+        let encoded = URL_SAFE_NO_PAD.encode(tag.as_bytes());
         format!("\"{}\"", encoded)
     }
 
