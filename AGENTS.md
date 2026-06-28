@@ -43,10 +43,13 @@ Full test / E2E / Dockerized PostgreSQL commands →
 - **Never mutate content blocks.** `content_blocks` is immutable and addressed
   by a signed content id — `Base64URL(BLAKE3(content) || keyed-MAC)`. Insert with
   `ON CONFLICT DO NOTHING`; never update or delete a stored block.
-- **Never weaken permalink purity.** An immutable permalink's `route_id` is the
-  signed content id: `BLAKE3(content)` as the 32-byte prefix plus a keyed MAC —
-  deterministic under the deployment `ID_SIGNING_SECRET` and independent of
-  extension or MIME type. Do not derive the prefix from anything but the content.
+- **Keep content addressing pure.** A content block's id is the signed content
+  id: `BLAKE3(content)` as the 32-byte prefix plus a keyed MAC — deterministic
+  under the deployment `ID_SIGNING_SECRET` and independent of extension or MIME
+  type. This id is an internal, immutable pointer to one exact version (the Data
+  Plane serves it directly), **not** a user-facing snippet kind. Every snippet
+  is an editable route — do not reintroduce a non-editable "permalink" type or
+  derive the content prefix from anything but the content.
 - **Never serve an unverified id.** Every Data Plane read MUST pass the keyed-MAC
   check (`IdSigner::verify`) before any cache or database lookup; a failed check
   is a `404`. This stateless gate is the DoS mitigation — do not bypass it or

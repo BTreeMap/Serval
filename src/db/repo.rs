@@ -33,6 +33,9 @@ pub struct Repository {
     pool: PgPool,
 }
 
+/// Inert default content type for blocks served without route metadata.
+const DEFAULT_CONTENT_TYPE: &str = "text/plain; charset=utf-8";
+
 impl Repository {
     /// Wrap a pool in the repository interface.
     #[must_use]
@@ -126,52 +129,58 @@ impl Repository {
         Ok(true)
     }
 
-    /// The Data Plane read path: resolve a live route to its current content
-    /// and presentation metadata via the index join. A live route is always
-    /// cached as [`CacheMode::Mutable`] — it may be repointed by its owner.
-    pub async fn fetch_delivery(
+    /// The Data Plane read path, resolved in a single round trip.
+    ///
+    /// A verified id resolves one of two disjoint ways, written as two
+    /// primary-key probes under one `UNION ALL`:
+    ///
+    /// * **Live route** — the id owns a `routes` row, so its *current* content
+    ///   and presentation metadata are served and cached as
+    ///   [`CacheMode::Mutable`]: the owner may repoint it at any time.
+    /// * **Content hash** — the id is itself a stored block's `hash_id`, naming
+    ///   exactly one immutable version, served directly as
+    ///   [`CacheMode::Immutable`]. A block carries no presentation metadata, so
+    ///   the inert [`DEFAULT_CONTENT_TYPE`] is used (a cosmetic filename
+    ///   extension can still drive the response MIME downstream).
+    ///
+    /// The 256-bit id prefix (CSPRNG route id vs. `BLAKE3` content hash) makes
+    /// the two branches collision-free, so the query yields at most one row and
+    /// a live route always wins. Both branches are unique-index scans on `$1`,
+    /// so the plan is statistics-independent and stable at any data volume.
+    pub async fn fetch_for_delivery(
         &self,
         id: &RouteId,
     ) -> Result<Option<DeliveryRecord>, sqlx::Error> {
-        let row = sqlx::query_as::<_, (String, String)>(
+        let row = sqlx::query_as::<_, (String, Option<String>, bool)>(
             r"
-            SELECT c.content, r.content_type
-            FROM routes r
-            INNER JOIN content_blocks c ON c.hash_id = r.target_hash
-            WHERE r.id = $1
+                SELECT c.content, r.content_type, TRUE AS via_route
+                FROM routes r
+                JOIN content_blocks c ON c.hash_id = r.target_hash
+                WHERE r.id = $1
+            UNION ALL
+                SELECT c.content, NULL::varchar, FALSE AS via_route
+                FROM content_blocks c
+                WHERE c.hash_id = $1
             ",
         )
         .bind(id.as_str())
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(row.map(|(content, content_type)| DeliveryRecord {
-            content,
-            content_type,
-            cache_mode: CacheMode::Mutable,
-        }))
-    }
-
-    /// The content-addressed delivery fallback: resolve an id directly to the
-    /// immutable stored block it names, independent of any route. This is the
-    /// internal "version permalink" path — a content hash addresses exactly one
-    /// version, so it is served as [`CacheMode::Immutable`]. The block carries
-    /// no presentation metadata, so the inert default content type is used
-    /// (a cosmetic filename extension can still drive the response MIME).
-    pub async fn fetch_content_block(
-        &self,
-        hash: &ContentHash,
-    ) -> Result<Option<DeliveryRecord>, sqlx::Error> {
-        let row =
-            sqlx::query_as::<_, (String,)>("SELECT content FROM content_blocks WHERE hash_id = $1")
-                .bind(hash.as_str())
-                .fetch_optional(&self.pool)
-                .await?;
-
-        Ok(row.map(|(content,)| DeliveryRecord {
-            content,
-            content_type: "text/plain; charset=utf-8".to_owned(),
-            cache_mode: CacheMode::Immutable,
+        Ok(row.map(|(content, content_type, via_route)| {
+            let (content_type, cache_mode) = if via_route {
+                (
+                    content_type.unwrap_or_else(|| DEFAULT_CONTENT_TYPE.to_owned()),
+                    CacheMode::Mutable,
+                )
+            } else {
+                (DEFAULT_CONTENT_TYPE.to_owned(), CacheMode::Immutable)
+            };
+            DeliveryRecord {
+                content,
+                content_type,
+                cache_mode,
+            }
         }))
     }
 

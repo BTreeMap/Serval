@@ -1,10 +1,10 @@
 //! The Data Plane: public, extreme-throughput snippet delivery.
 //!
 //! The hot path is GET-only and deliberately minimal: validate the id, read
-//! through the byte-bounded cache (loading via the index join on a miss, or the
-//! content-addressed fallback when no live route owns the id), render the
-//! template against the query string, and return the bytes with a cache policy
-//! derived from how the id resolved.
+//! through the byte-bounded cache (a single round trip resolves either the live
+//! route or the content-addressed version on a miss), render the template
+//! against the query string, and return the bytes with a cache policy derived
+//! from how the id resolved.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -17,13 +17,14 @@ use axum::routing::get;
 use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::cache::CachedSnippet;
-use crate::db::models::{CacheMode, ContentHash, RouteId};
+use crate::db::models::{CacheMode, RouteId};
 use crate::renderer;
 use crate::state::DeliveryState;
 
 /// Build the Data Plane router. Two shapes resolve the same route: a bare id,
 /// and an id followed by a cosmetic filename whose extension drives the MIME
-/// type. The id itself is never affected by the filename — permalink purity.
+/// type. The id itself is never affected by the filename — the content address
+/// stays pure.
 ///
 /// Every response carries a hardened, content-agnostic set of security headers.
 /// Delivered snippets are untrusted, attacker-influenceable bytes (the query
@@ -100,22 +101,14 @@ async fn deliver(
     let loaded = state
         .cache
         .get_or_load(&id, move || async move {
-            match repo.fetch_delivery(&load_id).await {
+            // One round trip resolves both delivery cases: a live route (served
+            // mutable) or, failing that, the verified id taken as a content
+            // hash naming one immutable stored version. The latter is the
+            // internal "version permalink" — never a separate kind of snippet,
+            // just a deterministic address for one version.
+            match repo.fetch_for_delivery(&load_id).await {
                 Ok(Some(record)) => Ok(CachedSnippet::from(record)),
-                Ok(None) => {
-                    // No live route owns this id. Fall back to the content-
-                    // addressed path: the verified id may itself be a content
-                    // hash naming an exact stored version, which we serve
-                    // directly with immutable caching. This is the internal
-                    // "version permalink" — never exposed as a separate kind of
-                    // snippet, just a deterministic address for one version.
-                    let hash = ContentHash::from_signed(load_id.as_str().to_owned());
-                    match repo.fetch_content_block(&hash).await {
-                        Ok(Some(record)) => Ok(CachedSnippet::from(record)),
-                        Ok(None) => Err(LoadError::NotFound),
-                        Err(e) => Err(LoadError::Database(e)),
-                    }
-                }
+                Ok(None) => Err(LoadError::NotFound),
                 Err(e) => Err(LoadError::Database(e)),
             }
         })

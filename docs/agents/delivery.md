@@ -19,26 +19,35 @@ telemetry or analytics state — it is intentionally stateless beyond the cache.
    PostgreSQL. The rejection is indistinguishable from "not found".
 3. Look up the `moka` cache for the `(content, content_type, cache_mode)` tuple
    keyed by `id`.
-4. On miss, resolve the id in two steps and store the result in `moka`:
-   - **Live route** — run the index join. If a route owns the id, serve its
-     current content; it may be repointed by its owner, so it is cached as
-     **mutable** (short TTL):
-     ```sql
-     SELECT c.content, r.content_type
-     FROM routes r
-     INNER JOIN content_blocks c ON c.hash_id = r.target_hash
-     WHERE r.id = $1;
-     ```
-   - **Content-addressed fallback** — if no route owns the id, the verified id
-     may itself be a content hash naming one exact stored version. Serve that
-     block directly and cache it as **immutable** (it can never change):
-     ```sql
-     SELECT content FROM content_blocks WHERE hash_id = $1;
-     ```
-     This is the internal "version permalink" path — a deterministic address for
-     a single revision, never a separate user-facing snippet kind. A block
-     carries no presentation metadata, so the inert default content type is used
-     (a cosmetic filename extension can still drive the response MIME).
+4. On miss, resolve the id in a **single round trip** and store the result in
+   `moka`. Both delivery cases are expressed as two primary-key probes under one
+   `UNION ALL`, so a live route always wins and the content-addressed path is
+   the fallback:
+   ```sql
+   SELECT c.content, r.content_type, TRUE  AS via_route
+   FROM routes r
+   JOIN content_blocks c ON c.hash_id = r.target_hash
+   WHERE r.id = $1
+   UNION ALL
+   SELECT c.content, NULL::varchar,     FALSE AS via_route
+   FROM content_blocks c
+   WHERE c.hash_id = $1;
+   ```
+   - **Live route** (`via_route = TRUE`) — the id owns a `routes` row; serve its
+     current content with the route's `content_type`. It may be repointed by its
+     owner, so it is cached as **mutable** (short TTL).
+   - **Content-addressed version** (`via_route = FALSE`) — the verified id is
+     itself a content hash naming one exact stored block. Serve it directly and
+     cache it as **immutable** (it can never change). This is the internal
+     "version permalink" path — a deterministic address for a single revision,
+     never a separate user-facing snippet kind. A block carries no presentation
+     metadata, so the inert default content type is used (a cosmetic filename
+     extension can still drive the response MIME).
+
+   The 256-bit id prefix (CSPRNG route id vs. `BLAKE3` content hash) makes the
+   two branches collision-free: the query returns **at most one row**, with no
+   precedence guard needed. Both branches are unique-index scans on `$1`, so the
+   plan is statistics-independent and stable at any data volume.
 5. Resolve the MIME type from the `*filename` extension via `mime_guess`,
    falling back to the stored `content_type`.
 6. Render the content with the query variables through `renderer.rs`.
