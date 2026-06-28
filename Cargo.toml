@@ -73,10 +73,6 @@ regex = "1"
 # Tolerant query-string parsing for delivery template variables
 form_urlencoded = "1"
 
-# Inline-stack Vec for small collections (e.g. ≤4 query-string variables)
-# avoids heap allocation on the hot delivery path.
-smallvec = "1"
-
 # MIME resolution
 mime_guess = "2"
 

@@ -2561,7 +2561,6 @@ dependencies = [
  "rust-embed",
  "serde",
  "serde_json",
- "smallvec",
  "socket2",
  "sqlx",
  "subtle",

@@ -7,6 +7,7 @@
 //! "tolerant rendering" guarantee the Data Plane depends on.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use regex::{Captures, Regex};
@@ -26,11 +27,11 @@ static PLACEHOLDER: LazyLock<Regex> =
 /// heap allocation. The caller may then serve the original bytes directly (e.g.
 /// via `bytes::Bytes::from_owner`) rather than copying.
 #[must_use]
-pub fn render<'a>(template: &'a str, variables: &[(Cow<'_, str>, Cow<'_, str>)]) -> Cow<'a, str> {
+pub fn render<'a>(template: &'a str, variables: &HashMap<String, String>) -> Cow<'a, str> {
     PLACEHOLDER.replace_all(template, |caps: &Captures<'_>| {
         let key = &caps[1];
-        match variables.iter().find(|(k, _)| k.as_ref() == key) {
-            Some((_, value)) => value.as_ref().to_owned(),
+        match variables.get(key) {
+            Some(value) => value.clone(),
             // Leave the original `{{key}}` literally in place.
             None => caps[0].to_string(),
         }
@@ -41,10 +42,10 @@ pub fn render<'a>(template: &'a str, variables: &[(Cow<'_, str>, Cow<'_, str>)])
 mod tests {
     use super::*;
 
-    fn vars<'a>(pairs: &[(&'a str, &'a str)]) -> Vec<(Cow<'a, str>, Cow<'a, str>)> {
+    fn vars(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         pairs
             .iter()
-            .map(|(k, v)| (Cow::Borrowed(*k), Cow::Borrowed(*v)))
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
             .collect()
     }
 
