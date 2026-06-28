@@ -103,6 +103,20 @@ jobs:
           # this, TCP slow-start fires at the beginning of each stage and
           # inflates early-stage latency, biasing p50/p95 upward.
           sudo sysctl -w net.ipv4.tcp_slow_start_after_idle=0
+          # Switch to BBR congestion control. CUBIC is loss-based: it halves
+          # its window on any detected loss, which on loopback (zero true
+          # congestion) means even transient tail drops trigger unnecessary
+          # window reductions and latency spikes. BBR is model-based and
+          # estimates bandwidth/RTT directly, producing much smoother p95/p99
+          # under burst storms. fq is the paired qdisc BBR requires.
+          sudo sysctl -w net.core.default_qdisc=fq
+          sudo sysctl -w net.ipv4.tcp_congestion_control=bbr
+          # Disable TCP metrics caching. The kernel caches ssthresh and RTT
+          # estimates per destination IP across connections. In the harness,
+          # the slow early stages (high latency, depressed throughput) leave
+          # pessimistic cached values that throttle the window size at the
+          # start of later, faster stages — polluting inter-stage comparisons.
+          sudo sysctl -w net.ipv4.tcp_no_metrics_save=1
           # Enable TCP Fast Open for both client (1) and server (2) sides.
           # Eliminates the SYN round-trip for repeated connections to the same
           # address, which is exactly the pattern the harness creates.
