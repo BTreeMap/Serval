@@ -97,6 +97,7 @@ async fn serve(config: Config, repo: Repository) -> Result<()> {
         cache: cache.clone(),
         auth,
         signer: signer.clone(),
+        data_plane_url: config.data_plane_url.as_deref().map(std::sync::Arc::from),
     };
     let delivery_state = DeliveryState {
         repo: delivery_repo,

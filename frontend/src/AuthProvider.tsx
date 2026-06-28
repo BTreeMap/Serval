@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, setAuthToken, type AuthMode, type Me } from "./api";
+import { api, setAuthToken, setDataPlaneUrl, type AuthMode, type Me } from "./api";
 import { AuthContext, type AuthState } from "./auth-context";
 
 const TOKEN_KEY = "serval.token";
@@ -26,6 +26,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             ]);
             if (info) {
                 setMode(info.mode);
+                setDataPlaneUrl(info.data_plane_url ?? null);
             }
             setMe(identity);
         } finally {

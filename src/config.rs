@@ -17,6 +17,12 @@ pub struct Config {
     pub database_max_connections: u32,
     pub control_plane_addr: SocketAddr,
     pub data_plane_addr: SocketAddr,
+    /// Public base URL at which the Data Plane is reachable by clients, e.g.
+    /// `https://cdn.example.com`. In a typical deployment the two planes live on
+    /// different domains, so the dashboard cannot assume the Data Plane shares
+    /// the Control Plane's origin. When unset the dashboard falls back to a
+    /// best-effort guess from its own location.
+    pub data_plane_url: Option<String>,
     pub cache_byte_budget: u64,
     pub cache_mutable_ttl: Duration,
     /// Deployment-wide secret salt for the route-id MAC. Keep it stable across
@@ -45,6 +51,10 @@ impl Config {
         let control_plane_addr = parse_addr("CONTROL_PLANE_ADDR", "0.0.0.0:8080")?;
         let data_plane_addr = parse_addr("DATA_PLANE_ADDR", "0.0.0.0:3000")?;
 
+        let data_plane_url = env("DATA_PLANE_PUBLIC_URL")
+            .map(|v| v.trim().trim_end_matches('/').to_owned())
+            .filter(|v| !v.is_empty());
+
         let cache_byte_budget = parse_or("CACHE_BYTE_BUDGET", 32 * 1024 * 1024)?;
         let cache_mutable_ttl = Duration::from_secs(parse_or("CACHE_MUTABLE_TTL_SECS", 300)?);
 
@@ -57,6 +67,7 @@ impl Config {
             database_max_connections,
             control_plane_addr,
             data_plane_addr,
+            data_plane_url,
             cache_byte_budget,
             cache_mutable_ttl,
             id_secret,

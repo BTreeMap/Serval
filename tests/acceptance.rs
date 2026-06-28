@@ -75,6 +75,7 @@ impl Harness {
             cache: cache.clone(),
             auth,
             signer: signer.clone(),
+            data_plane_url: None,
         };
         let data_state = DeliveryState {
             repo,

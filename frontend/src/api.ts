@@ -48,10 +48,14 @@ export interface Me {
 /** The authentication mode the backend enforces. */
 export type AuthMode = "none" | "oauth" | "cloudflare";
 
-/** Public auth metadata, fetched before the caller is authenticated so the
- *  sign-in screen can present the right flow. */
+/** Public bootstrap metadata, fetched before the caller is authenticated so the
+ *  sign-in screen can present the right flow and the dashboard knows where the
+ *  Data Plane lives. */
 export interface AuthInfo {
     mode: AuthMode;
+    /** Public base URL of the Data Plane, e.g. `https://cdn.example.com`. Null
+     *  when the backend leaves it unconfigured. */
+    data_plane_url?: string | null;
 }
 
 /** Payload for minting a new snippet. */
@@ -77,6 +81,15 @@ let authToken: string | null = null;
 /** Set (or clear) the bearer token sent with every subsequent request. */
 export function setAuthToken(token: string | null): void {
     authToken = token;
+}
+
+/** The Data Plane base URL advertised by the backend at bootstrap, when set. */
+let dataPlaneBaseUrl: string | null = null;
+
+/** Record the backend-advertised Data Plane base URL (call once at startup). */
+export function setDataPlaneUrl(url: string | null): void {
+    const trimmed = url?.trim().replace(/\/+$/, "");
+    dataPlaneBaseUrl = trimmed ? trimmed : null;
 }
 
 async function request<T>(
@@ -170,7 +183,17 @@ export const api = {
     },
 };
 
-/** Build the public Data Plane delivery URL for a snippet id. */
+/** Build the public Data Plane delivery URL for a snippet id.
+ *
+ * The Data Plane usually lives on a different domain than the dashboard, so the
+ * base is resolved in priority order: the backend-advertised URL (set at
+ * bootstrap), then the build-time `VITE_DATA_PLANE_URL`, and finally a
+ * best-effort guess of `:3000` on the dashboard's own hostname for local dev. */
 export function deliveryUrl(id: string): string {
-    return `${window.location.protocol}//${window.location.hostname}:3000/${id}`;
+    const buildTime = import.meta.env.VITE_DATA_PLANE_URL?.trim().replace(/\/+$/, "");
+    const base =
+        dataPlaneBaseUrl ??
+        (buildTime ? buildTime : null) ??
+        `${window.location.protocol}//${window.location.hostname}:3000`;
+    return new URL(encodeURIComponent(id), `${base}/`).toString();
 }

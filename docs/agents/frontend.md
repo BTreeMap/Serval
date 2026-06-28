@@ -29,11 +29,20 @@ npm run lint    # must pass for the quality gate
   stateless.
 - **No telemetry/analytics.** The system deliberately omits custom analytics and
   relies on edge network logs. Do not add client-side tracking.
+- **Build delivery links via `deliveryUrl(id)`, never by hand.** The Data Plane
+  usually lives on a *different domain* than the dashboard, so the base is
+  resolved at runtime: the backend advertises `DATA_PLANE_PUBLIC_URL` in the
+  `/api/auth-info` bootstrap, which the dashboard records via `setDataPlaneUrl`.
+  The helper falls back to the build-time `VITE_DATA_PLANE_URL`, then to a
+  `:3000`-on-this-host guess for local dev. Do not reintroduce a hardcoded port
+  or origin assumption.
 - Let the linter and formatter enforce style — mirror the surrounding code
   rather than hand-tuning formatting.
 
 ## Control Plane endpoints the UI uses
 
+- `GET /api/auth-info` — public bootstrap metadata, fetched before sign-in:
+  the active auth `mode` and the `data_plane_url` used to build delivery links.
 - `POST /api/snippets` — create. Computes `data_hash`, inserts the block
   (`ON CONFLICT DO NOTHING`), generates a CSPRNG `route_id`, and writes version 1
   to `pointer_history`. **Every snippet is editable** — there is no immutable

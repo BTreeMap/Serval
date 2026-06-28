@@ -90,19 +90,24 @@ pub struct MeResponse {
     pub is_admin: bool,
 }
 
-/// Public auth metadata so the dashboard can pick the right sign-in flow
-/// without first authenticating.
+/// Public app-bootstrap metadata the dashboard needs before it can
+/// authenticate: the active auth flow and where the Data Plane lives.
 #[derive(Debug, Serialize)]
 pub struct AuthInfoResponse {
     /// The active mode: `none`, `oauth`, or `cloudflare`.
     pub mode: &'static str,
+    /// Public base URL of the Data Plane (e.g. `https://cdn.example.com`), or
+    /// `null` when unconfigured so the dashboard guesses from its own origin.
+    pub data_plane_url: Option<String>,
 }
 
-/// `GET /api/auth-info` — report the configured auth mode. Unauthenticated: the
-/// sign-in screen needs this *before* it can present credentials.
+/// `GET /api/auth-info` — report the public bootstrap metadata. Unauthenticated:
+/// the sign-in screen needs this *before* it can present credentials, and the
+/// dashboard needs the Data Plane URL to build delivery links.
 pub async fn auth_info(State(state): State<ControlState>) -> Json<AuthInfoResponse> {
     Json(AuthInfoResponse {
         mode: state.auth.mode().as_str(),
+        data_plane_url: state.data_plane_url.as_deref().map(str::to_owned),
     })
 }
 

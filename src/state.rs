@@ -21,6 +21,10 @@ pub struct ControlState {
     pub auth: Arc<AuthService>,
     /// Mints signed route ids for newly created snippets.
     pub signer: IdSigner,
+    /// Public base URL of the Data Plane, advertised to the dashboard so it can
+    /// build delivery links even when the planes live on different domains.
+    /// `None` lets the dashboard fall back to guessing from its own origin.
+    pub data_plane_url: Option<Arc<str>>,
 }
 
 /// State for the Data Plane (public delivery).
