@@ -53,10 +53,10 @@ jobs:
         run: |
           # ── File descriptors ────────────────────────────────────────────────
           # Each TCP connection consumes one fd. At c25733 the harness needs
-          # 25K+ fds in a single process. The GitHub Actions default (1048576)
-          # is usually sufficient, but make it explicit so the number is
-          # documented and not subject to runner image variation.
-          ulimit -n 1048576
+          # 25K+ fds in a single process. ulimit -n cannot raise the hard limit
+          # in a GitHub Actions shell (EPERM), so use prlimit which works when
+          # invoked with sudo and can set both soft and hard limits directly.
+          sudo prlimit --pid $$ --nofile=1048576:1048576
 
           # ── Port range & TIME_WAIT pool ──────────────────────────────────────
           # Expand ephemeral ports from ~28K (32768–60999) to ~64K so that
