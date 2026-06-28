@@ -209,14 +209,14 @@ impl Repository {
         &self,
         id: &RouteId,
     ) -> Result<Option<DeliveryRecord>, sqlx::Error> {
-        let row = sqlx::query_as::<_, (String, Option<String>, bool)>(
+        let row = sqlx::query_as::<_, (String, Option<String>, String, bool)>(
             r"
-                SELECT c.content, r.content_type, TRUE AS via_route
+                SELECT c.content, r.content_type, r.target_hash, TRUE AS via_route
                 FROM routes r
                 JOIN content_blocks c ON c.hash_id = r.target_hash
                 WHERE r.id = $1
             UNION ALL
-                SELECT c.content, NULL::varchar, FALSE AS via_route
+                SELECT c.content, NULL::varchar, c.hash_id, FALSE AS via_route
                 FROM content_blocks c
                 WHERE c.hash_id = $1
             ",
@@ -225,7 +225,7 @@ impl Repository {
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(row.map(|(content, content_type, via_route)| {
+        Ok(row.map(|(content, content_type, target_hash, via_route)| {
             let (content_type, cache_mode) = if via_route {
                 (
                     content_type.unwrap_or_else(|| DEFAULT_CONTENT_TYPE.to_owned()),
@@ -238,8 +238,23 @@ impl Repository {
                 content,
                 content_type,
                 cache_mode,
+                target_hash,
             }
         }))
+    }
+
+    /// Lightweight step-1 probe: return the current `target_hash` for a live
+    /// route without loading its content. Used by the serve-stale refresh logic
+    /// and the mutable `304` revalidation path to detect whether the content
+    /// has changed since the cached entry was populated. Returns `None` when the
+    /// id does not resolve to a live route (immutable content-hash ids have no
+    /// `routes` row).
+    pub async fn fetch_target_hash(&self, id: &RouteId) -> Result<Option<String>, sqlx::Error> {
+        let row = sqlx::query_as::<_, (String,)>("SELECT target_hash FROM routes WHERE id = $1")
+            .bind(id.as_str())
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|(h,)| h))
     }
 
     /// Count the history rows recorded for a route. Used by the audit view and

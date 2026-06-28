@@ -61,7 +61,7 @@ impl Harness {
         let repo = Repository::new(pool);
 
         // The single shared cache is the crux of acceptance criterion #1.
-        let cache = DeliveryCache::new(32 * 1024 * 1024, Duration::from_secs(300));
+        let cache = DeliveryCache::new(32 * 1024 * 1024, Duration::from_secs(300), true);
         // One signer shared by both planes, exactly as the binary wires it.
         let signer = IdSigner::new(TEST_ID_SECRET);
         let auth = Arc::new(
@@ -81,6 +81,8 @@ impl Harness {
             repo,
             cache,
             signer: signer.clone(),
+            serve_stale: true,
+            mutable_ttl: Duration::from_secs(300),
         };
 
         let control_base = serve(api::router(control_state)).await;
@@ -254,6 +256,17 @@ impl Harness {
             .await
             .expect("delivery request")
             .status()
+    }
+
+    /// `GET {data}/{path}` with `If-None-Match: <etag>`, returning the full
+    /// response. Used to exercise the conditional-GET / 304 paths.
+    async fn deliver_conditional(&self, path: &str, etag: &str) -> reqwest::Response {
+        self.client
+            .get(format!("{}/{path}", self.data_base))
+            .header("If-None-Match", etag)
+            .send()
+            .await
+            .expect("conditional delivery request")
     }
 }
 
@@ -548,5 +561,136 @@ async fn title_and_description_are_metadata_only() {
         detail2["history_count"].as_u64(),
         Some(1),
         "clearing a title must not append a version"
+    );
+}
+
+/// Every `200` delivery response carries a strong `ETag` header, and a repeat
+/// request with `If-None-Match` set to that value returns `304 Not Modified`
+/// with no body.
+#[tokio::test]
+async fn etag_and_conditional_get() {
+    let h = Harness::start().await;
+
+    let created = h.create(json!({ "content": "etag payload" })).await;
+    let id = created["id"].as_str().expect("id").to_owned();
+
+    // First GET: must carry an ETag.
+    let (_, headers) = h.deliver(&id).await;
+    let etag = headers
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .expect("ETag header must be present on 200")
+        .to_owned();
+    assert!(
+        etag.starts_with('"') && etag.ends_with('"'),
+        "ETag must be a double-quoted strong validator, got {etag:?}"
+    );
+
+    // Second GET with If-None-Match: must return 304 with no body.
+    let resp = h.deliver_conditional(&id, &etag).await;
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::NOT_MODIFIED,
+        "matching ETag must yield 304"
+    );
+    let body = resp.bytes().await.expect("304 bytes");
+    assert!(body.is_empty(), "304 must have no body");
+}
+
+/// After a content update, the old ETag is stale: a conditional GET with it
+/// returns `200` with the new body and a new ETag.
+#[tokio::test]
+async fn conditional_get_reflects_update() {
+    let h = Harness::start().await;
+
+    let created = h.create(json!({ "content": "before" })).await;
+    let id = created["id"].as_str().expect("id").to_owned();
+
+    let (_, headers) = h.deliver(&id).await;
+    let old_etag = headers
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .expect("ETag on first 200")
+        .to_owned();
+
+    h.update(&id, "after").await;
+
+    // INM with the old ETag must yield 200 with new content.
+    let resp = h.deliver_conditional(&id, &old_etag).await;
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::OK,
+        "stale ETag must not 304 after an update"
+    );
+    let new_headers = resp.headers().clone();
+    let body = resp.text().await.expect("200 body");
+    assert_eq!(body, "after");
+
+    let new_etag = new_headers
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .expect("ETag on second 200")
+        .to_owned();
+    assert_ne!(old_etag, new_etag, "ETag must change when content changes");
+}
+
+/// Content-addressed (immutable) ids emit `ETag: "<id>"` and any conditional
+/// GET with that value returns `304` immediately — no cache or DB work needed.
+#[tokio::test]
+async fn immutable_etag_is_id_and_304_is_instant() {
+    let h = Harness::start().await;
+
+    let content = "immutable content for etag test";
+    let hash = h.signer.content_id(content);
+
+    // Populate the block via the normal creation path.
+    h.create(json!({ "content": content })).await;
+
+    // Serve the content-addressed version to get its ETag.
+    let (_, headers) = h.deliver(&hash).await;
+    let etag = headers
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .expect("ETag on immutable 200")
+        .to_owned();
+
+    // The ETag for an immutable id is `"<id>"` — the id itself double-quoted.
+    assert_eq!(
+        etag,
+        format!("\"{}\"", hash),
+        "immutable ETag must equal the double-quoted id"
+    );
+
+    // Conditional GET must return 304.
+    let resp = h.deliver_conditional(&hash, &etag).await;
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::NOT_MODIFIED,
+        "immutable INM shortcut must yield 304"
+    );
+}
+
+/// `Cache-Control` for mutable routes carries `stale-while-revalidate` when
+/// serve-stale is enabled (the default in the test harness).
+#[tokio::test]
+async fn cache_control_has_stale_while_revalidate() {
+    let h = Harness::start().await;
+
+    let created = h.create(json!({ "content": "swr payload" })).await;
+    let id = created["id"].as_str().expect("id").to_owned();
+
+    let (_, headers) = h.deliver(&id).await;
+    let cc = headers
+        .get("cache-control")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+
+    assert!(
+        cc.contains("stale-while-revalidate"),
+        "mutable route must carry stale-while-revalidate in Cache-Control, got {cc:?}"
+    );
+    assert!(
+        !cc.contains("must-revalidate"),
+        "stale-while-revalidate and must-revalidate are mutually exclusive, got {cc:?}"
     );
 }

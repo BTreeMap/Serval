@@ -62,6 +62,11 @@ const ID_BYTE_LEN: usize = PREFIX_LEN + MAC_LEN;
 /// Bumping this string rotates every id deployment-wide.
 const KEY_DERIVATION_CONTEXT: &str = "serval route-id mac v1";
 
+/// Domain-separation context for deriving the ETag key. Kept distinct from
+/// the MAC key so the permanent content-serving hash is never derivable from
+/// an ETag value even if the etag key is somehow exposed.
+const ETAG_KEY_DERIVATION_CONTEXT: &str = "serval delivery etag v1";
+
 /// Mints and verifies signed ids.
 ///
 /// Holds a 32-byte BLAKE3 key derived from the deployment secret. Cloning is
@@ -69,6 +74,9 @@ const KEY_DERIVATION_CONTEXT: &str = "serval route-id mac v1";
 #[derive(Clone)]
 pub struct IdSigner {
     key: [u8; blake3::KEY_LEN],
+    /// Separate key for ETag derivation so the permanent content-serving hash
+    /// is never exposed through the ETag value.
+    etag_key: [u8; blake3::KEY_LEN],
 }
 
 impl IdSigner {
@@ -81,7 +89,8 @@ impl IdSigner {
     #[must_use]
     pub fn new(secret: &str) -> Self {
         let key = blake3::derive_key(KEY_DERIVATION_CONTEXT, secret.as_bytes());
-        Self { key }
+        let etag_key = blake3::derive_key(ETAG_KEY_DERIVATION_CONTEXT, secret.as_bytes());
+        Self { key, etag_key }
     }
 
     /// Keyed MAC over a 32-byte prefix, truncated to [`MAC_LEN`] bytes.
@@ -125,8 +134,27 @@ impl IdSigner {
         self.assemble(prefix)
     }
 
-    /// Verify that `id` carries a MAC this signer would produce.
+    /// Compute a strong ETag value for a mutable route's current version.
     ///
+    /// The tag is `base64url(BLAKE3::keyed_hash(etag_key, target_hash_bytes ||
+    /// raw_query)[..16])` wrapped in RFC 9110 double-quotes, e.g. `"Fg3xkP9…"`.
+    /// The `etag_key` is derived under a context string distinct from the
+    /// route-id MAC key, so the permanent content-serving hash is never exposed.
+    ///
+    /// For immutable (content-addressed) ids the ETag is `"<id>"` — computed
+    /// directly by the delivery layer from the verified id, not through this
+    /// method.
+    #[must_use]
+    pub fn etag(&self, target_hash: &str, raw_query: &[u8]) -> String {
+        let mut message = Vec::with_capacity(target_hash.len() + raw_query.len());
+        message.extend_from_slice(target_hash.as_bytes());
+        message.extend_from_slice(raw_query);
+        let tag = blake3::keyed_hash(&self.etag_key, &message);
+        let encoded = URL_SAFE_NO_PAD.encode(&tag.as_bytes()[..16]);
+        format!("\"{}\"", encoded)
+    }
+
+    /// Verify that `id` carries a MAC this signer would produce.    ///
     /// Decodes the id, recomputes the MAC over its prefix, and compares in
     /// constant time. Returns `false` for any malformed, wrong-length, or
     /// forged id. This is the Data Plane's stateless admission gate.
@@ -260,5 +288,48 @@ mod tests {
         let id = a.random_id();
         assert!(a.verify(&id));
         assert!(!b.verify(&id));
+    }
+
+    #[test]
+    fn etag_is_deterministic() {
+        let s = signer();
+        let hash = s.content_id("payload");
+        assert_eq!(s.etag(&hash, b"port=8080"), s.etag(&hash, b"port=8080"));
+    }
+
+    #[test]
+    fn etag_differs_by_query() {
+        let s = signer();
+        let hash = s.content_id("payload");
+        assert_ne!(s.etag(&hash, b"port=8080"), s.etag(&hash, b"port=9090"));
+    }
+
+    #[test]
+    fn etag_differs_by_hash() {
+        let s = signer();
+        let h1 = s.content_id("v1");
+        let h2 = s.content_id("v2");
+        assert_ne!(s.etag(&h1, b""), s.etag(&h2, b""));
+    }
+
+    #[test]
+    fn etag_is_double_quoted_string() {
+        let s = signer();
+        let hash = s.content_id("payload");
+        let tag = s.etag(&hash, b"");
+        assert!(
+            tag.starts_with('"') && tag.ends_with('"'),
+            "ETag must be double-quoted: {tag}"
+        );
+    }
+
+    #[test]
+    fn etag_does_not_equal_content_id() {
+        // The ETag key is distinct from the MAC key: the ETag value must not
+        // equal the content id even when the query is empty.
+        let s = signer();
+        let hash = s.content_id("payload");
+        let tag_inner = s.etag(&hash, b"").trim_matches('"').to_owned();
+        assert_ne!(tag_inner, hash, "ETag inner must not equal the content id");
     }
 }

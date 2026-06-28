@@ -151,12 +151,14 @@ pub enum CacheMode {
 
 /// The columns needed to serve a delivery request. The `cache_mode` is set by
 /// the resolution path (live route vs. direct content-hash), not read from a
-/// column.
+/// column. The `target_hash` is the content block's hash: for a live route this
+/// is `routes.target_hash`; for a content-addressed id it is the id itself.
 #[derive(Debug, Clone)]
 pub struct DeliveryRecord {
     pub content: String,
     pub content_type: String,
     pub cache_mode: CacheMode,
+    pub target_hash: String,
 }
 
 /// The mutable, un-historied presentation annotations stored on a route: its

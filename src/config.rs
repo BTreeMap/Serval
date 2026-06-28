@@ -25,6 +25,9 @@ pub struct Config {
     pub data_plane_url: Option<String>,
     pub cache_byte_budget: u64,
     pub cache_mutable_ttl: Duration,
+    /// Whether to serve stale mutable entries immediately while refreshing in
+    /// the background. Defaults to `true`. Disable with `CACHE_SERVE_STALE=false`.
+    pub serve_stale: bool,
     /// Deployment-wide secret salt for the route-id MAC. Keep it stable across
     /// a deployment (rotating it invalidates every existing permalink/alias)
     /// and never log it.
@@ -57,6 +60,9 @@ impl Config {
 
         let cache_byte_budget = parse_or("CACHE_BYTE_BUDGET", 32 * 1024 * 1024)?;
         let cache_mutable_ttl = Duration::from_secs(parse_or("CACHE_MUTABLE_TTL_SECS", 300)?);
+        let serve_stale = env("CACHE_SERVE_STALE")
+            .map(|v| v.to_lowercase() != "false" && v != "0")
+            .unwrap_or(true);
 
         let id_secret = load_id_secret()?;
 
@@ -70,6 +76,7 @@ impl Config {
             data_plane_url,
             cache_byte_budget,
             cache_mutable_ttl,
+            serve_stale,
             id_secret,
             auth,
         })

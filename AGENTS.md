@@ -57,6 +57,16 @@ Full test / E2E / Dockerized PostgreSQL commands →
 - **Always evict the `moka` cache on writes.** A Control Plane write (`PATCH` or
   restore) MUST invalidate the affected `id` in the Data Plane cache so the next
   GET reflects the change. → [docs/agents/delivery.md](docs/agents/delivery.md).
+- **ETag-first delivery.** Every `200` carries a strong `ETag`. Content-addressed
+  ids use `"<id>"` as their validator (no computation); mutable routes use a
+  keyed BLAKE3 hash of `target_hash || raw_query` under a key distinct from the
+  id MAC. An `If-None-Match` match on a verified content-addressed id returns
+  `304` before any cache or DB work.
+- **Serve-stale by default.** Stale mutable entries are served immediately;
+  a single-flight background task performs a two-step refresh — step-1 probes
+  the `target_hash` only (cheap PK scan; zero data movement if unchanged),
+  step-2 pulls content only when the hash changed. Disable with
+  `CACHE_SERVE_STALE=false`. The uncached miss path stays 1-RTT unchanged.
 - **Don't bypass the storage layer.** Persistence goes through the shared pool;
   don't open ad-hoc DB connections inside handlers.
 - **Frontend: don't call `fetch`/`axios` directly.** Use the shared API client

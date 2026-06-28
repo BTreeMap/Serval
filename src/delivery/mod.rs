@@ -1,22 +1,34 @@
 //! The Data Plane: public, extreme-throughput snippet delivery.
 //!
-//! The hot path is GET-only and deliberately minimal: validate the id, read
-//! through the byte-bounded cache (a single round trip resolves either the live
-//! route or the content-addressed version on a miss), render the template
-//! against the query string, and return the bytes with a cache policy derived
-//! from how the id resolved.
+//! The hot path is GET-only and deliberately minimal:
+//!
+//! 1. **Stateless admission gate** — verify the route-id MAC; reject forgeries
+//!    before touching the cache or the database.
+//! 2. **Immutable shortcut** — if the client already holds the exact
+//!    content-addressed version (`If-None-Match: "<id>"`), return `304`
+//!    immediately with no cache or database work.
+//! 3. **Conditional GET on cache hits** — compute the strong ETag from the
+//!    cached `target_hash` and raw query; return `304` if it matches, else
+//!    render and serve.  Fresh hits with `If-None-Match` run a cheap step-1
+//!    probe (one PK scan on `routes`) so the `304` is never stale.
+//! 4. **Serve-stale** — stale mutable entries (age > `mutable_ttl` but within
+//!    the `2 × mutable_ttl` moka window) are served immediately; a single-flight
+//!    background task then performs a two-step refresh: step-1 checks whether
+//!    the hash changed (cheap), step-2 pulls content only if it did.
+//! 5. **Miss** — unchanged 1-RTT `fetch_for_delivery` → render → `200`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::{Path, RawQuery, State};
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use tower_http::set_header::SetResponseHeaderLayer;
 
-use crate::cache::CachedSnippet;
+use crate::cache::{CachedSnippet, DeliveryCache};
+use crate::db::Repository;
 use crate::db::models::{CacheMode, RouteId};
 use crate::renderer;
 use crate::state::DeliveryState;
@@ -63,16 +75,18 @@ async fn deliver_bare(
     State(state): State<DeliveryState>,
     Path(id): Path<String>,
     RawQuery(query): RawQuery,
+    headers: HeaderMap,
 ) -> Response {
-    deliver(&state, &id, None, query.as_deref()).await
+    deliver(&state, &id, None, query.as_deref(), &headers).await
 }
 
 async fn deliver_named(
     State(state): State<DeliveryState>,
     Path((id, filename)): Path<(String, String)>,
     RawQuery(query): RawQuery,
+    headers: HeaderMap,
 ) -> Response {
-    deliver(&state, &id, Some(&filename), query.as_deref()).await
+    deliver(&state, &id, Some(&filename), query.as_deref(), &headers).await
 }
 
 /// Shared delivery logic for both route shapes.
@@ -81,6 +95,7 @@ async fn deliver(
     raw_id: &str,
     filename: Option<&str>,
     query: Option<&str>,
+    headers: &HeaderMap,
 ) -> Response {
     // Reject anything that is not a well-formed 64-char id without touching the
     // database. Indistinguishable from "not found" to avoid id probing.
@@ -96,44 +111,184 @@ async fn deliver(
         return StatusCode::NOT_FOUND.into_response();
     }
 
-    let repo = state.repo.clone();
-    let load_id = id.clone();
-    let loaded = state
-        .cache
-        .get_or_load(&id, move || async move {
-            // One round trip resolves both delivery cases: a live route (served
-            // mutable) or, failing that, the verified id taken as a content
-            // hash naming one immutable stored version. The latter is the
-            // internal "version permalink" — never a separate kind of snippet,
-            // just a deterministic address for one version.
-            match repo.fetch_for_delivery(&load_id).await {
-                Ok(Some(record)) => Ok(CachedSnippet::from(record)),
-                Ok(None) => Err(LoadError::NotFound),
-                Err(e) => Err(LoadError::Database(e)),
+    let raw_query = query.unwrap_or("").as_bytes();
+    let inm = headers.get(header::IF_NONE_MATCH);
+    let ttl_secs = state.mutable_ttl.as_secs();
+
+    // Immutable shortcut: for content-addressed ids the ETag is just `"<id>"`.
+    // If the client already holds that exact validator, return 304 before the
+    // cache or database are consulted — the verified id IS the content address,
+    // so no further proof is needed.
+    let immutable_etag_str = format!("\"{}\"", raw_id);
+    if let Some(v) = inm
+        && v.to_str()
+            .map(|s| s.trim() == immutable_etag_str)
+            .unwrap_or(false)
+    {
+        return build_not_modified(
+            str_to_header(&immutable_etag_str),
+            cache_control_for(CacheMode::Immutable, ttl_secs, state.serve_stale),
+        );
+    }
+
+    match state.cache.get_cached(&id).await {
+        // ── MISS: unchanged 1-RTT fast path ─────────────────────────────────
+        None => {
+            let repo = state.repo.clone();
+            let load_id = id.clone();
+            let loaded = state
+                .cache
+                .get_or_load(&id, move || async move {
+                    match repo.fetch_for_delivery(&load_id).await {
+                        Ok(Some(record)) => Ok(CachedSnippet::from(record)),
+                        Ok(None) => Err(LoadError::NotFound),
+                        Err(e) => Err(LoadError::Database(e)),
+                    }
+                })
+                .await;
+
+            let snippet = match loaded {
+                Ok(s) => s,
+                Err(e) => return load_error_response(&e),
+            };
+
+            let etag = compute_etag(
+                raw_id,
+                snippet.cache_mode,
+                &snippet.target_hash,
+                raw_query,
+                state,
+            );
+            if let Some(v) = inm
+                && etag_matches(v, &etag)
+            {
+                return build_not_modified(
+                    etag,
+                    cache_control_for(snippet.cache_mode, ttl_secs, state.serve_stale),
+                );
             }
-        })
-        .await;
+            build_ok(&snippet, filename, query, raw_query, etag, ttl_secs, state)
+        }
 
-    let snippet = match loaded {
-        Ok(snippet) => snippet,
-        Err(err) => return load_error_response(&err),
-    };
+        // ── HIT (fresh or stale) ─────────────────────────────────────────────
+        Some((snippet, is_stale)) => {
+            // For a fresh hit with If-None-Match, run the cheap step-1 probe so
+            // the 304 decision is always current. For stale hits (or absent INM)
+            // derive the ETag from the cached hash — zero additional DB work.
+            let etag = if !is_stale {
+                if let Some(v) = inm {
+                    // Step-1 probe: one PK scan on `routes`.
+                    match state.repo.fetch_target_hash(&id).await {
+                        Ok(Some(ref current_hash)) => {
+                            let fresh_etag = mutable_etag(current_hash, raw_query, state);
+                            if etag_matches(v, &fresh_etag) {
+                                return build_not_modified(
+                                    fresh_etag,
+                                    cache_control_for(
+                                        CacheMode::Mutable,
+                                        ttl_secs,
+                                        state.serve_stale,
+                                    ),
+                                );
+                            }
+                            fresh_etag
+                        }
+                        // Immutable id (no route row) or DB error: fall through
+                        // with the cached ETag.
+                        Ok(None) | Err(_) => compute_etag(
+                            raw_id,
+                            snippet.cache_mode,
+                            &snippet.target_hash,
+                            raw_query,
+                            state,
+                        ),
+                    }
+                } else {
+                    compute_etag(
+                        raw_id,
+                        snippet.cache_mode,
+                        &snippet.target_hash,
+                        raw_query,
+                        state,
+                    )
+                }
+            } else {
+                compute_etag(
+                    raw_id,
+                    snippet.cache_mode,
+                    &snippet.target_hash,
+                    raw_query,
+                    state,
+                )
+            };
 
-    let variables = parse_query(query);
-    let body = renderer::render(&snippet.content, &variables);
+            // Stale hit: serve immediately, then fire the single-flight refresh.
+            if is_stale {
+                let stale_hash = Arc::clone(&snippet.target_hash);
+                let repo = state.repo.clone();
+                let cache = state.cache.clone();
+                let bg_id = id.clone();
+                if cache.try_claim_refresh(&bg_id).await {
+                    tokio::spawn(background_refresh(repo, cache, bg_id, stale_hash));
+                }
+            }
 
-    let content_type = resolve_content_type(filename, &snippet.content_type);
-    let cache_control = cache_control_for(snippet.cache_mode);
+            // INM check against the (possibly step-1-refreshed) ETag.
+            if let Some(v) = inm
+                && etag_matches(v, &etag)
+            {
+                return build_not_modified(
+                    etag,
+                    cache_control_for(snippet.cache_mode, ttl_secs, state.serve_stale),
+                );
+            }
 
-    (
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, content_type),
-            (header::CACHE_CONTROL, cache_control),
-        ],
-        body,
-    )
-        .into_response()
+            build_ok(&snippet, filename, query, raw_query, etag, ttl_secs, state)
+        }
+    }
+}
+
+/// Background two-step refresh for a stale cache entry.
+///
+/// Step-1: cheap hash probe — if the route's `target_hash` is unchanged, just
+/// reset the entry's freshness timer (zero data movement). Step-2: only if the
+/// hash changed, pull the full content and re-insert. The single-flight guard is
+/// released when the task completes.
+async fn background_refresh(
+    repo: Repository,
+    cache: DeliveryCache,
+    id: RouteId,
+    stale_hash: Arc<str>,
+) {
+    match repo.fetch_target_hash(&id).await {
+        Ok(Some(ref current_hash)) if current_hash.as_str() != stale_hash.as_ref() => {
+            // Hash changed: step-2 data pull.
+            match repo.fetch_for_delivery(&id).await {
+                Ok(Some(record)) => {
+                    cache.insert(&id, record).await;
+                }
+                Ok(None) => {
+                    cache.invalidate(&id).await;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "background refresh step-2 failed");
+                }
+            }
+        }
+        Ok(Some(_)) => {
+            // Hash unchanged: reset the freshness timer — zero data movement.
+            if let Some((entry, _)) = cache.get_cached(&id).await {
+                cache.touch(&id, entry).await;
+            }
+        }
+        Ok(None) => {
+            // No live route (immutable id or deleted): nothing to refresh.
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "background refresh step-1 failed");
+        }
+    }
+    cache.finish_refresh(&id).await;
 }
 
 /// Map a load failure to a response, logging only genuine database errors.
@@ -145,6 +300,71 @@ fn load_error_response(err: &Arc<LoadError>) -> Response {
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
+}
+
+/// Build a `200 OK` response rendering the snippet against the query variables.
+fn build_ok(
+    snippet: &CachedSnippet,
+    filename: Option<&str>,
+    query: Option<&str>,
+    raw_query: &[u8],
+    etag: HeaderValue,
+    ttl_secs: u64,
+    state: &DeliveryState,
+) -> Response {
+    let variables = parse_query(query);
+    let body = renderer::render(&snippet.content, &variables);
+    let content_type = resolve_content_type(filename, &snippet.content_type);
+    let cc = cache_control_for(snippet.cache_mode, ttl_secs, state.serve_stale);
+    let _ = raw_query; // captured in etag already
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CACHE_CONTROL, cc),
+            (header::ETAG, etag),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+/// Build a `304 Not Modified` response.
+fn build_not_modified(etag: HeaderValue, cache_control: HeaderValue) -> Response {
+    let mut resp = StatusCode::NOT_MODIFIED.into_response();
+    resp.headers_mut().insert(header::ETAG, etag);
+    resp.headers_mut()
+        .insert(header::CACHE_CONTROL, cache_control);
+    resp
+}
+
+/// Compute the strong ETag for a delivery response.
+///
+/// * **Immutable** ids: `"<id>"` — the id itself is the content address.
+/// * **Mutable** routes: `signer.etag(target_hash, raw_query)` — a keyed hash
+///   under a key distinct from the route-id MAC, so the serving hash is never
+///   derivable from the ETag.
+fn compute_etag(
+    raw_id: &str,
+    mode: CacheMode,
+    target_hash: &str,
+    raw_query: &[u8],
+    state: &DeliveryState,
+) -> HeaderValue {
+    match mode {
+        CacheMode::Immutable => str_to_header(&format!("\"{}\"", raw_id)),
+        CacheMode::Mutable => mutable_etag(target_hash, raw_query, state),
+    }
+}
+
+/// ETag for a mutable route given its `target_hash` and the raw query bytes.
+fn mutable_etag(target_hash: &str, raw_query: &[u8], state: &DeliveryState) -> HeaderValue {
+    str_to_header(&state.signer.etag(target_hash, raw_query))
+}
+
+/// Returns `true` if the client's `If-None-Match` value matches our ETag.
+fn etag_matches(inm: &HeaderValue, etag: &HeaderValue) -> bool {
+    inm.as_bytes() == etag.as_bytes()
 }
 
 /// Parse the query string into template variables. Repeated keys keep the last
@@ -180,15 +400,33 @@ fn resolve_content_type(filename: Option<&str>, stored: &str) -> HeaderValue {
         .unwrap_or_else(|_| HeaderValue::from_static("text/plain; charset=utf-8"))
 }
 
-/// Choose a `Cache-Control` policy from how the id resolved. A live route may
-/// be repointed by its owner, so it gets a short, revalidated TTL behind the
-/// in-process cache; a content-addressed version names one immutable block and
-/// is safe to cache aggressively at the edge.
-fn cache_control_for(mode: CacheMode) -> HeaderValue {
+/// Choose a `Cache-Control` policy.
+///
+/// * **Immutable** ids → `public, max-age=31536000, immutable` (safe to cache
+///   forever at the edge; the content never changes).
+/// * **Mutable** routes, serve-stale on → `public, max-age=<ttl>,
+///   stale-while-revalidate=<ttl>`. The CDN may serve stale for one extra TTL
+///   while it revalidates in the background, matching the in-process behaviour.
+/// * **Mutable** routes, serve-stale off → `public, max-age=<ttl>,
+///   must-revalidate`.
+fn cache_control_for(mode: CacheMode, mutable_ttl_secs: u64, serve_stale: bool) -> HeaderValue {
     match mode {
         CacheMode::Immutable => HeaderValue::from_static("public, max-age=31536000, immutable"),
-        CacheMode::Mutable => HeaderValue::from_static("public, max-age=60, must-revalidate"),
+        CacheMode::Mutable => {
+            let s = if serve_stale {
+                format!(
+                    "public, max-age={mutable_ttl_secs}, stale-while-revalidate={mutable_ttl_secs}"
+                )
+            } else {
+                format!("public, max-age={mutable_ttl_secs}, must-revalidate")
+            };
+            str_to_header(&s)
+        }
     }
+}
+
+fn str_to_header(s: &str) -> HeaderValue {
+    HeaderValue::from_str(s).unwrap_or_else(|_| HeaderValue::from_static(""))
 }
 
 #[cfg(test)]
@@ -256,12 +494,31 @@ mod tests {
     #[test]
     fn cache_control_reflects_mutability() {
         assert_eq!(
-            cache_control_for(CacheMode::Immutable).to_str().unwrap(),
+            cache_control_for(CacheMode::Immutable, 300, false)
+                .to_str()
+                .unwrap(),
             "public, max-age=31536000, immutable"
         );
         assert_eq!(
-            cache_control_for(CacheMode::Mutable).to_str().unwrap(),
-            "public, max-age=60, must-revalidate"
+            cache_control_for(CacheMode::Mutable, 300, false)
+                .to_str()
+                .unwrap(),
+            "public, max-age=300, must-revalidate"
         );
+        assert_eq!(
+            cache_control_for(CacheMode::Mutable, 300, true)
+                .to_str()
+                .unwrap(),
+            "public, max-age=300, stale-while-revalidate=300"
+        );
+    }
+
+    #[test]
+    fn etag_matches_exact_bytes() {
+        let a = HeaderValue::from_static("\"abc\"");
+        let b = HeaderValue::from_static("\"abc\"");
+        let c = HeaderValue::from_static("\"xyz\"");
+        assert!(etag_matches(&a, &b));
+        assert!(!etag_matches(&a, &c));
     }
 }
