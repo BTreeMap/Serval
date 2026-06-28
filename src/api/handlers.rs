@@ -106,6 +106,18 @@ pub struct AuthInfoResponse {
     /// Public base URL of the Data Plane (e.g. `https://cdn.example.com`), or
     /// `null` when unconfigured so the dashboard guesses from its own origin.
     pub data_plane_url: Option<String>,
+    /// Frontend-safe OAuth bootstrap settings for the browser-managed flow.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<OAuthFrontendConfig>,
+}
+
+/// Public OAuth bootstrap settings consumed by the frontend.
+#[derive(Debug, Serialize)]
+pub struct OAuthFrontendConfig {
+    pub issuer_url: String,
+    pub client_id: String,
+    pub scopes: String,
+    pub redirect_uri: String,
 }
 
 /// `GET /api/auth-info` — report the public bootstrap metadata. Unauthenticated:
@@ -115,6 +127,15 @@ pub async fn auth_info(State(state): State<ControlState>) -> Json<AuthInfoRespon
     Json(AuthInfoResponse {
         mode: state.auth.mode().as_str(),
         data_plane_url: state.data_plane_url.as_deref().map(str::to_owned),
+        oauth: state
+            .auth
+            .oauth_frontend()
+            .map(|oauth| OAuthFrontendConfig {
+                issuer_url: oauth.issuer_url.clone(),
+                client_id: oauth.client_id.clone(),
+                scopes: oauth.scopes.clone(),
+                redirect_uri: oauth.redirect_uri.clone(),
+            }),
     })
 }
 
@@ -398,6 +419,7 @@ fn normalize_content_type(requested: Option<String>) -> Result<String, ApiError>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn content_type_defaults_when_absent() {
@@ -450,5 +472,50 @@ mod tests {
             authorize_write(&other, Some("u1")),
             Err(ApiError::Forbidden)
         ));
+    }
+
+    #[test]
+    fn auth_info_serializes_oauth_config_when_present() {
+        let response = AuthInfoResponse {
+            mode: "oauth",
+            data_plane_url: Some("https://cdn.example.com".to_owned()),
+            oauth: Some(OAuthFrontendConfig {
+                issuer_url: "https://issuer.example.com".to_owned(),
+                client_id: "serval-web".to_owned(),
+                scopes: "openid profile email".to_owned(),
+                redirect_uri: "https://app.example.com/auth/callback".to_owned(),
+            }),
+        };
+
+        assert_eq!(
+            serde_json::to_value(response).unwrap(),
+            json!({
+                "mode": "oauth",
+                "data_plane_url": "https://cdn.example.com",
+                "oauth": {
+                    "issuer_url": "https://issuer.example.com",
+                    "client_id": "serval-web",
+                    "scopes": "openid profile email",
+                    "redirect_uri": "https://app.example.com/auth/callback"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn auth_info_omits_oauth_config_when_absent() {
+        let response = AuthInfoResponse {
+            mode: "cloudflare",
+            data_plane_url: None,
+            oauth: None,
+        };
+
+        assert_eq!(
+            serde_json::to_value(response).unwrap(),
+            json!({
+                "mode": "cloudflare",
+                "data_plane_url": null
+            })
+        );
     }
 }

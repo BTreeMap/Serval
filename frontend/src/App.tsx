@@ -3,6 +3,7 @@ import { AuthProvider } from "./AuthProvider";
 import { useAuth } from "./auth-context";
 import { Dashboard } from "./Dashboard";
 import { Layout } from "./Layout";
+import { OAuthCallback } from "./OAuthCallback";
 import { SignIn } from "./SignIn";
 import { SnippetDetail } from "./SnippetDetail";
 import { Loading } from "./ui";
@@ -11,7 +12,10 @@ import { Loading } from "./ui";
 export function App() {
   return (
     <AuthProvider>
-      <Gate />
+      <Routes>
+        <Route path="/auth/callback" element={<OAuthCallback />} />
+        <Route path="*" element={<Gate />} />
+      </Routes>
     </AuthProvider>
   );
 }

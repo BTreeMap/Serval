@@ -65,6 +65,18 @@ pub struct OAuthSettings {
     pub audience: String,
     pub jwks_url: String,
     pub jwks_cache_ttl: Duration,
+    pub client_id: String,
+    pub scopes: String,
+    pub redirect_uri: String,
+}
+
+/// Frontend-safe OAuth bootstrap settings.
+#[derive(Debug, Clone)]
+pub struct OAuthFrontendConfig {
+    pub issuer_url: String,
+    pub client_id: String,
+    pub scopes: String,
+    pub redirect_uri: String,
 }
 
 /// Static configuration for validating Cloudflare Access JWTs.
@@ -128,15 +140,22 @@ struct JwtAuth {
 pub struct AuthService {
     mode: AuthMode,
     jwt: Option<JwtAuth>,
+    oauth_frontend: Option<OAuthFrontendConfig>,
 }
 
 impl AuthService {
     /// Construct the service from resolved configuration, priming the JWKS
     /// cache up front so the first real request does not pay refresh latency.
     pub async fn new(config: AuthConfig) -> anyhow::Result<Self> {
-        let (mode, jwt) = match config {
-            AuthConfig::None => (AuthMode::None, None),
+        let (mode, jwt, oauth_frontend) = match config {
+            AuthConfig::None => (AuthMode::None, None, None),
             AuthConfig::Oauth(settings) => {
+                let oauth_frontend = OAuthFrontendConfig {
+                    issuer_url: settings.issuer.clone(),
+                    client_id: settings.client_id.clone(),
+                    scopes: settings.scopes.clone(),
+                    redirect_uri: settings.redirect_uri.clone(),
+                };
                 let validator = JwtValidator::new(
                     settings.issuer,
                     settings.audience,
@@ -150,6 +169,7 @@ impl AuthService {
                         validator,
                         source: TokenSource::Bearer,
                     }),
+                    Some(oauth_frontend),
                 )
             }
             AuthConfig::Cloudflare(settings) => {
@@ -168,10 +188,15 @@ impl AuthService {
                         validator,
                         source: TokenSource::CloudflareAccess,
                     }),
+                    None,
                 )
             }
         };
-        Ok(Self { mode, jwt })
+        Ok(Self {
+            mode,
+            jwt,
+            oauth_frontend,
+        })
     }
 
     /// The configured mode, surfaced to the dashboard so it can present the
@@ -179,6 +204,12 @@ impl AuthService {
     #[must_use]
     pub fn mode(&self) -> AuthMode {
         self.mode
+    }
+
+    /// Frontend-safe bootstrap settings for browser-managed OAuth flows.
+    #[must_use]
+    pub fn oauth_frontend(&self) -> Option<&OAuthFrontendConfig> {
+        self.oauth_frontend.as_ref()
     }
 
     /// Whether this service performs real authentication.

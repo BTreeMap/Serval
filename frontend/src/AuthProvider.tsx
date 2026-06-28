@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, setAuthToken, setDataPlaneUrl, type AuthMode, type Me } from "./api";
+import { api, setAuthToken, setDataPlaneUrl, type AuthMode, type Me, type OAuthFrontendConfig } from "./api";
 import { AuthContext, type AuthState } from "./auth-context";
+import { beginAuthorizationFlow, completeAuthorizationFlow, selectBearerToken } from "./oidc";
 
 const TOKEN_KEY = "serval.token";
 
@@ -15,6 +16,7 @@ const TOKEN_KEY = "serval.token";
 export function AuthProvider({ children }: { children: React.ReactNode }) {
     const [me, setMe] = useState<Me | null>(null);
     const [mode, setMode] = useState<AuthMode | null>(null);
+    const [oauthConfig, setOauthConfig] = useState<OAuthFrontendConfig | null>(null);
     const [loading, setLoading] = useState(true);
 
     const probe = useCallback(async () => {
@@ -27,6 +29,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             if (info) {
                 setMode(info.mode);
                 setDataPlaneUrl(info.data_plane_url ?? null);
+                setOauthConfig(info.oauth ?? null);
             }
             setMe(identity);
         } finally {
@@ -45,7 +48,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         void probe();
     }, [probe]);
 
-    const signIn = useCallback(
+    const login = useCallback(
         async (token: string) => {
             localStorage.setItem(TOKEN_KEY, token);
             setAuthToken(token);
@@ -54,12 +57,45 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         [probe],
     );
 
+    const startOAuthLogin = useCallback(async () => {
+        if (mode !== "oauth") {
+            return;
+        }
+        if (!oauthConfig) {
+            throw new Error("OAuth is not configured on this deployment.");
+        }
+        await beginAuthorizationFlow(oauthConfig);
+    }, [mode, oauthConfig]);
+
+    const completeOAuthLogin = useCallback(
+        async (code: string, state: string) => {
+            if (!oauthConfig) {
+                throw new Error("OAuth is not configured on this deployment.");
+            }
+            const tokenResponse = await completeAuthorizationFlow({
+                code,
+                state,
+                config: oauthConfig,
+            });
+            await login(selectBearerToken(tokenResponse));
+        },
+        [login, oauthConfig],
+    );
+
     const signOut = useCallback(() => {
         localStorage.removeItem(TOKEN_KEY);
         setAuthToken(null);
         setMe(null);
     }, []);
 
-    const value: AuthState = { me, mode, loading, signIn, signOut };
+    const value: AuthState = {
+        me,
+        mode,
+        loading,
+        oauthConfig,
+        startOAuthLogin,
+        completeOAuthLogin,
+        signOut,
+    };
     return <AuthContext value={value}>{children}</AuthContext>;
 }

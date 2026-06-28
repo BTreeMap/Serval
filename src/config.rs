@@ -114,6 +114,11 @@ fn load_auth() -> Result<AuthConfig> {
                 require("OAUTH_AUDIENCE").context("AUTH_MODE=oauth requires OAUTH_AUDIENCE")?;
             let jwks_url =
                 require("OAUTH_JWKS_URL").context("AUTH_MODE=oauth requires OAUTH_JWKS_URL")?;
+            let client_id =
+                require("OAUTH_CLIENT_ID").context("AUTH_MODE=oauth requires OAUTH_CLIENT_ID")?;
+            let scopes = env("OAUTH_SCOPES").unwrap_or_else(|| "openid profile email".to_owned());
+            let redirect_uri = require("OAUTH_REDIRECT_URI")
+                .context("AUTH_MODE=oauth requires OAUTH_REDIRECT_URI")?;
             let jwks_cache_ttl =
                 Duration::from_secs(parse_or("OAUTH_JWKS_CACHE_TTL_SECS", 300)?.max(60));
             Ok(AuthConfig::Oauth(OAuthSettings {
@@ -121,6 +126,9 @@ fn load_auth() -> Result<AuthConfig> {
                 audience,
                 jwks_url,
                 jwks_cache_ttl,
+                client_id,
+                scopes,
+                redirect_uri,
             }))
         }
         AuthMode::Cloudflare => {

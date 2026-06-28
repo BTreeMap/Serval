@@ -56,6 +56,32 @@ export interface AuthInfo {
     /** Public base URL of the Data Plane, e.g. `https://cdn.example.com`. Null
      *  when the backend leaves it unconfigured. */
     data_plane_url?: string | null;
+    /** Frontend-safe OAuth bootstrap settings for browser-managed login. */
+    oauth?: OAuthFrontendConfig | null;
+}
+
+/** Public OAuth bootstrap settings exposed by the Control Plane. */
+export interface OAuthFrontendConfig {
+    issuer_url: string;
+    client_id: string;
+    scopes: string;
+    redirect_uri: string;
+}
+
+/** Minimal OIDC discovery document fields required for PKCE login. */
+export interface OidcDiscoveryResponse {
+    authorization_endpoint: string;
+    token_endpoint: string;
+}
+
+/** Token response from the OAuth provider's token endpoint. */
+export interface OidcTokenResponse {
+    access_token: string;
+    token_type: string;
+    expires_in?: number;
+    id_token?: string;
+    scope?: string;
+    refresh_token?: string;
 }
 
 /** Payload for minting a new snippet. */
@@ -145,6 +171,41 @@ async function extractError(response: Response): Promise<string> {
 export const api = {
     authInfo(): Promise<AuthInfo> {
         return request<AuthInfo>("/api/auth-info");
+    },
+
+    async getOidcDiscovery(issuerUrl: string): Promise<OidcDiscoveryResponse> {
+        const discoveryUrl = `${issuerUrl.replace(/\/$/, "")}/.well-known/openid-configuration`;
+        const response = await fetch(discoveryUrl);
+        if (!response.ok) {
+            throw new ApiError(response.status, await extractError(response));
+        }
+        return (await response.json()) as OidcDiscoveryResponse;
+    },
+
+    async exchangeOidcCode(params: {
+        tokenEndpoint: string;
+        code: string;
+        clientId: string;
+        redirectUri: string;
+        codeVerifier: string;
+    }): Promise<OidcTokenResponse> {
+        const body = new URLSearchParams({
+            grant_type: "authorization_code",
+            code: params.code,
+            client_id: params.clientId,
+            redirect_uri: params.redirectUri,
+            code_verifier: params.codeVerifier,
+        });
+
+        const response = await fetch(params.tokenEndpoint, {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body,
+        });
+        if (!response.ok) {
+            throw new ApiError(response.status, await extractError(response));
+        }
+        return (await response.json()) as OidcTokenResponse;
     },
 
     me(): Promise<Me> {

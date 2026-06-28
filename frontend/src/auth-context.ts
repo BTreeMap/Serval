@@ -1,5 +1,5 @@
 import { createContext, useContext } from "react";
-import type { AuthMode, Me } from "./api";
+import type { AuthMode, Me, OAuthFrontendConfig } from "./api";
 
 /** Shared authentication state exposed to the whole app. */
 export interface AuthState {
@@ -9,8 +9,12 @@ export interface AuthState {
     mode: AuthMode | null;
     /** True while the initial identity probe is in flight. */
     loading: boolean;
-    /** Replace the active bearer token and re-probe identity. */
-    signIn: (token: string) => Promise<void>;
+    /** Frontend-safe OAuth bootstrap settings, when oauth mode is enabled. */
+    oauthConfig: OAuthFrontendConfig | null;
+    /** Begin the browser-driven OAuth PKCE flow. */
+    startOAuthLogin: () => Promise<void>;
+    /** Complete the OAuth callback by exchanging the auth code for tokens. */
+    completeOAuthLogin: (code: string, state: string) => Promise<void>;
     /** Clear the active token and identity. */
     signOut: () => void;
 }
