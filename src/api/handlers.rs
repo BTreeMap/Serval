@@ -19,6 +19,8 @@ use crate::state::ControlState;
 
 const DEFAULT_CONTENT_TYPE: &str = "text/plain; charset=utf-8";
 const MAX_CONTENT_TYPE_LEN: usize = 255;
+const MAX_TITLE_LEN: usize = 255;
+const MAX_DESCRIPTION_LEN: usize = 4096;
 
 /// Request body for creating a snippet.
 #[derive(Debug, Deserialize)]
@@ -28,19 +30,32 @@ pub struct CreateRequest {
     /// Optional MIME type; defaults to `text/plain; charset=utf-8`.
     #[serde(default)]
     pub content_type: Option<String>,
+    /// Optional human-readable title for the snippet.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Optional human-readable description for the snippet.
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 /// Request body for updating a snippet.
 ///
 /// A partial update: supply `content` to repoint the route at a new version,
-/// `content_type` to change its stored presentation metadata, or both. At least
-/// one field must be present.
+/// `content_type` to change its stored presentation metadata, `title` and/or
+/// `description` to update those annotations, or any combination. At least one
+/// field must be present.
 #[derive(Debug, Deserialize)]
 pub struct UpdateRequest {
     #[serde(default)]
     pub content: Option<String>,
     #[serde(default)]
     pub content_type: Option<String>,
+    /// Set to an empty string to clear the title.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Set to an empty string to clear the description.
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 /// Request body for restoring a snippet to one of its earlier versions.
@@ -55,6 +70,8 @@ pub struct RestoreRequest {
 pub struct SnippetResponse {
     pub id: String,
     pub content_type: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
     pub owner_id: Option<String>,
 }
 /// A compact route listing entry for the dashboard index.
@@ -62,6 +79,8 @@ pub struct SnippetResponse {
 pub struct SnippetSummary {
     pub id: String,
     pub content_type: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
     pub owner_id: Option<String>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -78,6 +97,8 @@ pub struct HistoryItem {
 pub struct SnippetDetail {
     pub id: String,
     pub content_type: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
     pub owner_id: Option<String>,
     pub history_count: usize,
     pub history: Vec<HistoryItem>,
@@ -158,6 +179,8 @@ pub async fn list_snippets(
         .map(|r| SnippetSummary {
             id: r.id,
             content_type: r.content_type,
+            title: r.title,
+            description: r.description,
             owner_id: r.owner_id,
             updated_at: r.updated_at,
         })
@@ -172,6 +195,8 @@ pub async fn create_snippet(
     Json(req): Json<CreateRequest>,
 ) -> Result<(StatusCode, Json<SnippetResponse>), ApiError> {
     let content_type = normalize_content_type(req.content_type)?;
+    let title = normalize_annotation(req.title, "title", MAX_TITLE_LEN)?;
+    let description = normalize_annotation(req.description, "description", MAX_DESCRIPTION_LEN)?;
 
     // Mint the signed content id (the content-block key) and an unguessable,
     // random route id. The route is the user-facing, editable handle; the
@@ -186,6 +211,8 @@ pub async fn create_snippet(
             hash: hash.clone(),
             content: &req.content,
             content_type: &content_type,
+            title: title.as_deref(),
+            description: description.as_deref(),
             owner_id: Some(&caller.user_id),
             editor_id: &caller.user_id,
         })
@@ -210,6 +237,8 @@ pub async fn create_snippet(
         Json(SnippetResponse {
             id: id.into_inner(),
             content_type,
+            title,
+            description,
             owner_id,
         }),
     ))
@@ -234,9 +263,13 @@ pub async fn update_snippet(
     authorize_write(&caller, meta.owner_id.as_deref())?;
 
     // A partial update must change something.
-    if req.content.is_none() && req.content_type.is_none() {
+    if req.content.is_none()
+        && req.content_type.is_none()
+        && req.title.is_none()
+        && req.description.is_none()
+    {
         return Err(ApiError::BadRequest(
-            "update must set content or content_type".to_owned(),
+            "update must set at least one field".to_owned(),
         ));
     }
 
@@ -269,12 +302,40 @@ pub async fn update_snippet(
         None => meta.content_type,
     };
 
+    let title = match req.title {
+        Some(raw) => {
+            let normalized = normalize_annotation(Some(raw), "title", MAX_TITLE_LEN)?;
+            if !state.repo.set_title(&id, normalized.as_deref()).await? {
+                return Err(ApiError::NotFound);
+            }
+            normalized
+        }
+        None => meta.title,
+    };
+
+    let description = match req.description {
+        Some(raw) => {
+            let normalized = normalize_annotation(Some(raw), "description", MAX_DESCRIPTION_LEN)?;
+            if !state
+                .repo
+                .set_description(&id, normalized.as_deref())
+                .await?
+            {
+                return Err(ApiError::NotFound);
+            }
+            normalized
+        }
+        None => meta.description,
+    };
+
     // Cross-thread invalidation: the next Data Plane GET must see new content.
     state.cache.invalidate(&id).await;
 
     Ok(Json(SnippetResponse {
         id: id.into_inner(),
         content_type,
+        title,
+        description,
         owner_id: meta.owner_id,
     }))
 }
@@ -309,6 +370,8 @@ pub async fn get_snippet(
     Ok(Json(SnippetDetail {
         id: id.into_inner(),
         content_type: meta.content_type,
+        title: meta.title,
+        description: meta.description,
         owner_id: meta.owner_id,
         history_count,
         history,
@@ -382,6 +445,8 @@ pub async fn restore_snippet(
     Ok(Json(SnippetResponse {
         id: id.into_inner(),
         content_type: meta.content_type,
+        title: meta.title,
+        description: meta.description,
         owner_id: meta.owner_id,
     }))
 }
@@ -392,6 +457,31 @@ fn authorize_write(caller: &Caller, owner_id: Option<&str>) -> Result<(), ApiErr
         Ok(())
     } else {
         Err(ApiError::Forbidden)
+    }
+}
+
+/// Validate and normalize an optional free-text annotation (title or
+/// description). Trims whitespace; treats empty as absent (`None`). Returns
+/// `Ok(None)` if the input was absent or became empty after trimming.
+fn normalize_annotation(
+    value: Option<String>,
+    field: &str,
+    max_len: usize,
+) -> Result<Option<String>, ApiError> {
+    match value {
+        None => Ok(None),
+        Some(v) => {
+            let trimmed = v.trim().to_owned();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else if trimmed.len() > max_len {
+                Err(ApiError::BadRequest(format!(
+                    "{field} exceeds {max_len} characters"
+                )))
+            } else {
+                Ok(Some(trimmed))
+            }
+        }
     }
 }
 
@@ -517,5 +607,39 @@ mod tests {
                 "data_plane_url": null
             })
         );
+    }
+
+    #[test]
+    fn annotation_absent_yields_none() {
+        assert_eq!(normalize_annotation(None, "title", 255).unwrap(), None);
+    }
+
+    #[test]
+    fn annotation_empty_or_whitespace_yields_none() {
+        assert_eq!(
+            normalize_annotation(Some(String::new()), "title", 255).unwrap(),
+            None
+        );
+        assert_eq!(
+            normalize_annotation(Some("   ".to_owned()), "title", 255).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn annotation_trims_whitespace() {
+        assert_eq!(
+            normalize_annotation(Some("  hello  ".to_owned()), "title", 255).unwrap(),
+            Some("hello".to_owned())
+        );
+    }
+
+    #[test]
+    fn annotation_rejects_overlong() {
+        let long = "a".repeat(MAX_TITLE_LEN + 1);
+        assert!(matches!(
+            normalize_annotation(Some(long), "title", MAX_TITLE_LEN),
+            Err(ApiError::BadRequest(_))
+        ));
     }
 }

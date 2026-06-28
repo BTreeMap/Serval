@@ -18,4 +18,5 @@ export {
     LoaderCircle,
     LogOut,
     Link as LinkIcon,
+    Pencil,
 } from "lucide-react";

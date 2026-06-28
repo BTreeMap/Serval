@@ -144,6 +144,38 @@ impl Harness {
         );
     }
 
+    /// `PATCH /api/snippets/{id}` updating only the `title` annotation.
+    async fn update_title(&self, id: &str, title: &str) {
+        let resp = self
+            .client
+            .patch(format!("{}/api/snippets/{id}", self.control_base))
+            .json(&json!({ "title": title }))
+            .send()
+            .await
+            .expect("title update request");
+        assert!(
+            resp.status().is_success(),
+            "title update failed: {}",
+            resp.status()
+        );
+    }
+
+    /// `PATCH /api/snippets/{id}` updating only the `description` annotation.
+    async fn update_description(&self, id: &str, description: &str) {
+        let resp = self
+            .client
+            .patch(format!("{}/api/snippets/{id}", self.control_base))
+            .json(&json!({ "description": description }))
+            .send()
+            .await
+            .expect("description update request");
+        assert!(
+            resp.status().is_success(),
+            "description update failed: {}",
+            resp.status()
+        );
+    }
+
     /// `GET /api/snippets/{id}`, returning the detail JSON body.
     async fn detail(&self, id: &str) -> Value {
         let resp = self
@@ -451,5 +483,70 @@ async fn content_type_update_is_metadata_only() {
         headers.get("content-type").and_then(|v| v.to_str().ok()),
         Some("application/json"),
         "cache was not evicted on a content-type update"
+    );
+}
+
+/// Title and description are un-historied annotations on the route. Setting,
+/// updating, and clearing them is reflected on the next detail fetch and on
+/// the listing, without ever appending a new row to the version ledger.
+#[tokio::test]
+async fn title_and_description_are_metadata_only() {
+    let h = Harness::start().await;
+
+    // Create without annotations; both fields should be absent.
+    let created = h.create(json!({ "content": "data" })).await;
+    let id = created["id"].as_str().expect("id").to_owned();
+    assert!(
+        created["title"].is_null(),
+        "title should be null on creation"
+    );
+    assert!(
+        created["description"].is_null(),
+        "description should be null on creation"
+    );
+
+    // Set title and description; detail and list should reflect them.
+    h.update_title(&id, "My Snippet").await;
+    h.update_description(&id, "A test snippet").await;
+
+    let detail = h.detail(&id).await;
+    assert_eq!(detail["title"], json!("My Snippet"));
+    assert_eq!(detail["description"], json!("A test snippet"));
+    assert_eq!(
+        detail["history_count"].as_u64(),
+        Some(1),
+        "annotation updates must not append a version"
+    );
+
+    // Create with title+description inline at creation time.
+    let created2 = h
+        .create(json!({
+            "content": "v1",
+            "title": "Inline Title",
+            "description": "  Trimmed  "
+        }))
+        .await;
+    assert_eq!(created2["title"], json!("Inline Title"));
+    assert_eq!(
+        created2["description"],
+        json!("Trimmed"),
+        "leading/trailing whitespace should be stripped"
+    );
+
+    // Updating title to empty string clears it (sets to null).
+    let id2 = created2["id"].as_str().expect("id2").to_owned();
+    h.update_title(&id2, "").await;
+    let detail2 = h.detail(&id2).await;
+    assert!(
+        detail2["title"].is_null(),
+        "empty title update should clear the annotation"
+    );
+
+    // Description remains unchanged after clearing only the title.
+    assert_eq!(detail2["description"], json!("Trimmed"));
+    assert_eq!(
+        detail2["history_count"].as_u64(),
+        Some(1),
+        "clearing a title must not append a version"
     );
 }

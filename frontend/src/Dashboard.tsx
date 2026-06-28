@@ -16,6 +16,7 @@ import {
   CopyButton,
   EmptyState,
   Icons,
+  Input,
   Skeleton,
   Textarea,
 } from "./ui";
@@ -90,13 +91,33 @@ function SnippetRow({ snippet }: { snippet: SnippetSummary }) {
     <li>
       <Card className="flex flex-col gap-3 p-4 transition-colors hover:border-wisteria/40 sm:flex-row sm:items-center sm:justify-between sm:gap-4 md:p-5 lg:gap-6 lg:p-6">
         <div className="min-w-0">
-          <Link
-            to={`/s/${snippet.id}`}
-            className="block truncate rounded font-mono text-sm text-wisteria-deep hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-wisteria/50"
-          >
-            {snippet.id}
-          </Link>
+          {snippet.title ? (
+            <>
+              <Link
+                to={`/s/${snippet.id}`}
+                className="block truncate text-sm font-medium text-wisteria-deep hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-wisteria/50"
+              >
+                {snippet.title}
+              </Link>
+              <code className="block truncate font-mono text-xs text-ink-faint">
+                {snippet.id}
+              </code>
+            </>
+          ) : (
+            <Link
+              to={`/s/${snippet.id}`}
+              className="block truncate rounded font-mono text-sm text-wisteria-deep hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-wisteria/50"
+            >
+              {snippet.id}
+            </Link>
+          )}
           <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-ink-soft">
+            {snippet.description && (
+              <>
+                <span className="max-w-xs truncate">{snippet.description}</span>
+                <span aria-hidden>·</span>
+              </>
+            )}
             <span>{snippet.content_type}</span>
             <span aria-hidden>·</span>
             <span>updated {formatDate(snippet.updated_at)}</span>
@@ -119,6 +140,8 @@ function SnippetRow({ snippet }: { snippet: SnippetSummary }) {
 function CreateForm({ onCreated }: { onCreated: () => void }) {
   const [content, setContent] = useState("");
   const [contentType, setContentType] = useState("text/plain; charset=utf-8");
+  const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [created, setCreated] = useState<SnippetResponse | null>(null);
@@ -135,10 +158,18 @@ function CreateForm({ onCreated }: { onCreated: () => void }) {
       if (contentType.trim()) {
         payload.content_type = contentType.trim();
       }
+      if (title.trim()) {
+        payload.title = title.trim();
+      }
+      if (description.trim()) {
+        payload.description = description.trim();
+      }
       const result = await api.createSnippet(payload);
       setCreated(result);
       setContent("");
       setContentType("text/plain; charset=utf-8");
+      setTitle("");
+      setDescription("");
       onCreated();
     } catch (err) {
       setError(messageOf(err));
@@ -155,6 +186,22 @@ function CreateForm({ onCreated }: { onCreated: () => void }) {
         placeholders, substituted from the delivery URL query string.
       </p>
       <form onSubmit={(e) => void submit(e)} className="mt-4 space-y-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:gap-4">
+          <Input
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            placeholder="Title (optional)"
+            aria-label="Snippet title"
+            className="sm:flex-1"
+          />
+          <Input
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            placeholder="Description (optional)"
+            aria-label="Snippet description"
+            className="sm:flex-1"
+          />
+        </div>
         <Textarea
           value={content}
           onChange={(e) => setContent(e.target.value)}

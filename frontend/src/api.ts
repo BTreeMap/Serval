@@ -6,6 +6,8 @@
 export interface SnippetResponse {
     id: string;
     content_type: string;
+    title?: string | null;
+    description?: string | null;
     owner_id: string | null;
 }
 
@@ -26,6 +28,8 @@ export interface VersionContent {
 export interface SnippetDetail {
     id: string;
     content_type: string;
+    title?: string | null;
+    description?: string | null;
     owner_id: string | null;
     history_count: number;
     history: HistoryItem[];
@@ -35,6 +39,8 @@ export interface SnippetDetail {
 export interface SnippetSummary {
     id: string;
     content_type: string;
+    title?: string | null;
+    description?: string | null;
     owner_id: string | null;
     updated_at: string;
 }
@@ -88,13 +94,19 @@ export interface OidcTokenResponse {
 export interface CreateRequest {
     content: string;
     content_type?: string;
+    title?: string;
+    description?: string;
 }
 
 /** Payload for a partial snippet update: repoint at new `content`, change the
- *  stored `content_type`, or both. At least one field must be present. */
+ *  stored `content_type`, update `title`/`description`, or any combination.
+ *  At least one field must be present. Send an empty string for `title` or
+ *  `description` to clear them. */
 export interface UpdateRequest {
     content?: string;
     content_type?: string;
+    title?: string;
+    description?: string;
 }
 
 /** A typed error carrying the HTTP status for caller-side branching. */

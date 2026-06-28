@@ -165,6 +165,8 @@ pub struct DeliveryRecord {
 pub struct RouteMeta {
     pub target_hash: String,
     pub content_type: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
     pub owner_id: Option<String>,
 }
 
@@ -182,6 +184,8 @@ pub struct HistoryEntry {
 pub struct RouteSummary {
     pub id: String,
     pub content_type: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
     pub owner_id: Option<String>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }

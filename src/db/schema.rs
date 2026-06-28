@@ -38,12 +38,23 @@ pub async fn apply(pool: &PgPool) -> Result<(), sqlx::Error> {
             id VARCHAR(64) PRIMARY KEY,
             target_hash VARCHAR(64) NOT NULL REFERENCES content_blocks (hash_id),
             content_type VARCHAR(255) NOT NULL DEFAULT 'text/plain; charset=utf-8',
+            title VARCHAR(255),
+            description TEXT,
             owner_id VARCHAR(255)
         )
         ",
     )
     .execute(pool)
     .await?;
+
+    // Idempotent migration: add title and description to tables created before
+    // this feature. Safe to run against tables that already have these columns.
+    sqlx::query("ALTER TABLE routes ADD COLUMN IF NOT EXISTS title VARCHAR(255)")
+        .execute(pool)
+        .await?;
+    sqlx::query("ALTER TABLE routes ADD COLUMN IF NOT EXISTS description TEXT")
+        .execute(pool)
+        .await?;
 
     // Append-only version ledger. Never pruned.
     sqlx::query(

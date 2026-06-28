@@ -23,6 +23,8 @@ pub struct CreateRoute<'a> {
     pub hash: ContentHash,
     pub content: &'a str,
     pub content_type: &'a str,
+    pub title: Option<&'a str>,
+    pub description: Option<&'a str>,
     pub owner_id: Option<&'a str>,
     pub editor_id: &'a str,
 }
@@ -63,14 +65,16 @@ impl Repository {
 
         let inserted = sqlx::query(
             r"
-            INSERT INTO routes (id, target_hash, content_type, owner_id)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO routes (id, target_hash, content_type, title, description, owner_id)
+            VALUES ($1, $2, $3, $4, $5, $6)
             ON CONFLICT (id) DO NOTHING
             ",
         )
         .bind(params.id.as_str())
         .bind(params.hash.as_str())
         .bind(params.content_type)
+        .bind(params.title)
+        .bind(params.description)
         .bind(params.owner_id)
         .execute(&mut *tx)
         .await?
@@ -143,6 +147,38 @@ impl Repository {
         let updated = sqlx::query("UPDATE routes SET content_type = $2 WHERE id = $1")
             .bind(id.as_str())
             .bind(content_type)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+
+        Ok(updated != 0)
+    }
+
+    /// Update only a route's optional title annotation without touching the
+    /// content pointer or the history ledger. Pass `None` to clear the title.
+    /// Returns `Ok(false)` if the route does not exist.
+    pub async fn set_title(&self, id: &RouteId, title: Option<&str>) -> Result<bool, sqlx::Error> {
+        let updated = sqlx::query("UPDATE routes SET title = $2 WHERE id = $1")
+            .bind(id.as_str())
+            .bind(title)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+
+        Ok(updated != 0)
+    }
+
+    /// Update only a route's optional description annotation without touching
+    /// the content pointer or the history ledger. Pass `None` to clear it.
+    /// Returns `Ok(false)` if the route does not exist.
+    pub async fn set_description(
+        &self,
+        id: &RouteId,
+        description: Option<&str>,
+    ) -> Result<bool, sqlx::Error> {
+        let updated = sqlx::query("UPDATE routes SET description = $2 WHERE id = $1")
+            .bind(id.as_str())
+            .bind(description)
             .execute(&self.pool)
             .await?
             .rows_affected();
@@ -308,18 +344,22 @@ impl Repository {
     /// Fetch routing-layer metadata for a route (no content). Returns `None`
     /// when the route does not exist.
     pub async fn fetch_route_meta(&self, id: &RouteId) -> Result<Option<RouteMeta>, sqlx::Error> {
-        let row = sqlx::query_as::<_, (String, String, Option<String>)>(
-            "SELECT target_hash, content_type, owner_id FROM routes WHERE id = $1",
+        let row = sqlx::query_as::<_, (String, String, Option<String>, Option<String>, Option<String>)>(
+            "SELECT target_hash, content_type, title, description, owner_id FROM routes WHERE id = $1",
         )
         .bind(id.as_str())
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(row.map(|(target_hash, content_type, owner_id)| RouteMeta {
-            target_hash,
-            content_type,
-            owner_id,
-        }))
+        Ok(row.map(
+            |(target_hash, content_type, title, description, owner_id)| RouteMeta {
+                target_hash,
+                content_type,
+                title,
+                description,
+                owner_id,
+            },
+        ))
     }
 
     /// List a user's routes, most recently changed first. The "last changed"
@@ -336,18 +376,22 @@ impl Repository {
                 String,
                 String,
                 Option<String>,
+                Option<String>,
+                Option<String>,
                 chrono::DateTime<chrono::Utc>,
             ),
         >(
             r"
             SELECT r.id,
                    r.content_type,
+                   r.title,
+                   r.description,
                    r.owner_id,
                    COALESCE(MAX(h.changed_at), NOW()) AS updated_at
             FROM routes r
             LEFT JOIN pointer_history h ON h.route_id = r.id
             WHERE r.owner_id = $1
-            GROUP BY r.id, r.content_type, r.owner_id
+            GROUP BY r.id, r.content_type, r.title, r.description, r.owner_id
             ORDER BY updated_at DESC
             ",
         )
@@ -357,12 +401,16 @@ impl Repository {
 
         Ok(rows
             .into_iter()
-            .map(|(id, content_type, owner_id, updated_at)| RouteSummary {
-                id,
-                content_type,
-                owner_id,
-                updated_at,
-            })
+            .map(
+                |(id, content_type, title, description, owner_id, updated_at)| RouteSummary {
+                    id,
+                    content_type,
+                    title,
+                    description,
+                    owner_id,
+                    updated_at,
+                },
+            )
             .collect())
     }
 
