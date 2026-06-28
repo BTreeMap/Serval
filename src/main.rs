@@ -7,7 +7,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::net::SocketAddr;
-use tokio::net::{TcpListener, TcpSocket};
+use tokio::net::TcpListener;
 use tokio::signal;
 
 use serval::auth::AuthService;
@@ -118,34 +118,11 @@ async fn serve(config: Config, repo: Repository) -> Result<()> {
             )
         })?;
 
-    // Bind one delivery socket per Tokio worker thread with SO_REUSEPORT.
-    // The kernel distributes incoming SYNs across all listening sockets,
-    // eliminating the single accept-loop bottleneck: each worker thread gets
-    // its own kernel-side accept queue and accepts connections independently.
-    // Uses tokio::net::TcpSocket directly — no socket2 dependency needed.
-    let worker_threads = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4)
-        .max(1);
+    // Bind the delivery plane listeners. On Unix, SO_REUSEPORT gives N
+    // parallel accept queues (one per CPU). On other platforms a single
+    // listener is used instead — see bind_delivery_listeners.
     let delivery_addr: SocketAddr = config.data_plane_addr;
-    let mut delivery_listeners = Vec::with_capacity(worker_threads);
-    for _ in 0..worker_threads {
-        let sock = match delivery_addr {
-            SocketAddr::V4(_) => TcpSocket::new_v4(),
-            SocketAddr::V6(_) => TcpSocket::new_v6(),
-        }
-        .context("tokio: create delivery socket")?;
-        sock.set_reuseport(true)
-            .context("tokio: SO_REUSEPORT on delivery socket")?;
-        sock.set_reuseaddr(true)
-            .context("tokio: SO_REUSEADDR on delivery socket")?;
-        sock.bind(delivery_addr)
-            .with_context(|| format!("tokio: bind delivery socket to {delivery_addr}"))?;
-        let listener = sock
-            .listen(65535)
-            .context("tokio: listen on delivery socket")?;
-        delivery_listeners.push(listener);
-    }
+    let delivery_listeners = bind_delivery_listeners(delivery_addr)?;
 
     tracing::info!(
         control_plane = %config.control_plane_addr,
@@ -183,6 +160,66 @@ async fn serve(config: Config, repo: Repository) -> Result<()> {
 
     tracing::info!("serval shut down cleanly");
     Ok(())
+}
+
+/// Bind the delivery plane TCP listeners.
+///
+/// On Unix platforms where `SO_REUSEPORT` is available (Linux, macOS,
+/// FreeBSD, …) binds one socket per available CPU. The kernel distributes
+/// incoming SYNs across all sockets so each Tokio worker thread has its own
+/// accept queue, eliminating the single accept-loop bottleneck.
+///
+/// On platforms that do not support `SO_REUSEPORT` (Windows, Solaris,
+/// illumos, Cygwin) falls back gracefully to a single standard listener so
+/// the server still starts correctly — without the throughput optimisation.
+fn bind_delivery_listeners(addr: SocketAddr) -> Result<Vec<TcpListener>> {
+    #[cfg(all(
+        unix,
+        not(target_os = "solaris"),
+        not(target_os = "illumos"),
+        not(target_os = "cygwin")
+    ))]
+    {
+        use tokio::net::TcpSocket;
+        let n = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .max(1);
+        let mut listeners = Vec::with_capacity(n);
+        for _ in 0..n {
+            let sock = match addr {
+                SocketAddr::V4(_) => TcpSocket::new_v4(),
+                SocketAddr::V6(_) => TcpSocket::new_v6(),
+            }
+            .context("create delivery socket")?;
+            sock.set_reuseport(true)
+                .context("SO_REUSEPORT on delivery socket")?;
+            sock.set_reuseaddr(true)
+                .context("SO_REUSEADDR on delivery socket")?;
+            sock.bind(addr)
+                .with_context(|| format!("bind delivery socket to {addr}"))?;
+            listeners.push(sock.listen(65535).context("listen on delivery socket")?);
+        }
+        Ok(listeners)
+    }
+    // Fallback for platforms without SO_REUSEPORT (Windows, Solaris, …).
+    #[cfg(not(all(
+        unix,
+        not(target_os = "solaris"),
+        not(target_os = "illumos"),
+        not(target_os = "cygwin")
+    )))]
+    {
+        let std_listener = std::net::TcpListener::bind(addr)
+            .with_context(|| format!("failed to bind data plane on {addr}"))?;
+        std_listener
+            .set_nonblocking(true)
+            .context("failed to set delivery socket to nonblocking")?;
+        Ok(vec![
+            TcpListener::from_std(std_listener)
+                .context("failed to create tokio delivery listener")?,
+        ])
+    }
 }
 
 /// Execute an offline admin-allowlist command.
