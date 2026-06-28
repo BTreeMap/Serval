@@ -8,7 +8,38 @@ import {
   type SnippetResponse,
   type SnippetSummary,
 } from "./api";
-import { Button, Card, CopyButton, ErrorBanner } from "./ui";
+import {
+  Button,
+  Card,
+  Combobox,
+  CopyButton,
+  ErrorBanner,
+} from "./ui";
+
+/** Canonical MIME types offered as create-form suggestions. Serval stores text,
+ *  so the list favors the formats people actually paste as snippets: prose,
+ *  markup, config and data. Each entry is the canonical IANA form (charset on
+ *  the `text/*` types). The value at delivery time still prefers a
+ *  filename-extension guess; this only sets the fallback stored on the route,
+ *  and free text is always allowed for anything not listed here. */
+const COMMON_CONTENT_TYPES = [
+  "text/plain; charset=utf-8",
+  "text/html; charset=utf-8",
+  "text/markdown; charset=utf-8",
+  "text/css; charset=utf-8",
+  "text/javascript; charset=utf-8",
+  "text/csv; charset=utf-8",
+  "text/tab-separated-values; charset=utf-8",
+  "text/xml; charset=utf-8",
+  "application/json",
+  "application/ld+json",
+  "application/yaml",
+  "application/toml",
+  "application/xml",
+  "application/rss+xml",
+  "application/atom+xml",
+  "image/svg+xml",
+] as const;
 
 /** The landing page: a creation form above the caller's existing snippets. */
 export function Dashboard() {
@@ -91,7 +122,7 @@ function SnippetRow({ snippet }: { snippet: SnippetSummary }) {
 /** The snippet creation form. */
 function CreateForm({ onCreated }: { onCreated: () => void }) {
   const [content, setContent] = useState("");
-  const [contentType, setContentType] = useState("");
+  const [contentType, setContentType] = useState("text/plain; charset=utf-8");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [created, setCreated] = useState<SnippetResponse | null>(null);
@@ -111,7 +142,7 @@ function CreateForm({ onCreated }: { onCreated: () => void }) {
       const result = await api.createSnippet(payload);
       setCreated(result);
       setContent("");
-      setContentType("");
+      setContentType("text/plain; charset=utf-8");
       onCreated();
     } catch (err) {
       setError(messageOf(err));
@@ -136,11 +167,12 @@ function CreateForm({ onCreated }: { onCreated: () => void }) {
           className="w-full resize-y rounded-lg border border-line bg-canvas px-3 py-2 font-mono text-sm text-ink focus:border-wisteria focus:outline-none"
         />
         <div className="flex flex-wrap items-center gap-4">
-          <input
+          <Combobox
             value={contentType}
-            onChange={(e) => setContentType(e.target.value)}
-            placeholder="content type (optional)"
-            className="flex-1 rounded-lg border border-line bg-canvas px-3 py-2 text-sm text-ink focus:border-wisteria focus:outline-none"
+            onChange={setContentType}
+            options={COMMON_CONTENT_TYPES}
+            placeholder="content type"
+            className="flex-1"
           />
           <Button type="submit" disabled={busy}>
             {busy ? "Creating…" : "Create"}

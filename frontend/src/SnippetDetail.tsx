@@ -199,6 +199,10 @@ function HistoryList({
                   <Badge tone={isCurrent ? "wisteria" : "neutral"}>
                     {isCurrent ? "current" : `v${history.length - index}`}
                   </Badge>
+                  <CopyButton
+                    value={deliveryUrl(entry.target_hash)}
+                    label="Copy link"
+                  />
                   <Button variant="ghost" onClick={() => void view(entry.target_hash)}>
                     {isOpen ? "Hide" : "View"}
                   </Button>
