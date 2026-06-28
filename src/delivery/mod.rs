@@ -159,42 +159,25 @@ fn parse_query(query: Option<&str>) -> HashMap<String, String> {
 }
 
 /// Resolve the response MIME type: prefer the filename extension, falling back
-/// to the stored `content_type`. Falls back further to the stored value if the
-/// guess is not a legal header.
+/// to the stored `content_type`, and finally to inert `text/plain` if the
+/// stored value is not a legal header.
 ///
-/// The public plane never serves active HTML: because the query string is
-/// reflected into the body unescaped and the client controls the filename
-/// extension, honoring `text/html` would turn any snippet with a placeholder
-/// into a reflected-XSS vector. Any `text/html` result — however it was derived
-/// — is therefore downgraded to inert `text/plain; charset=utf-8`.
+/// The type is passed through untouched — including `text/html`. Active content
+/// is defused by the blanket response headers, not by rewriting the type: every
+/// delivery carries `X-Content-Type-Options: nosniff` and a
+/// `default-src 'none'; sandbox` CSP, which strips script execution, subresource
+/// loads, form submission and same-origin access from any document. A reflected
+/// `text/html` snippet is therefore already served inert, so no special case is
+/// needed.
 fn resolve_content_type(filename: Option<&str>, stored: &str) -> HeaderValue {
     if let Some(name) = filename
         && let Some(guess) = mime_guess::from_path(name).first()
         && let Ok(value) = HeaderValue::from_str(guess.as_ref())
     {
-        return neutralize_html(value);
+        return value;
     }
-    let value = HeaderValue::from_str(stored)
-        .unwrap_or_else(|_| HeaderValue::from_static("text/plain; charset=utf-8"));
-    neutralize_html(value)
-}
-
-/// Downgrade any `text/html` content type to inert `text/plain; charset=utf-8`,
-/// leaving every other type untouched. The check ignores parameters and case so
-/// `Text/HTML; charset=...` is caught as well.
-fn neutralize_html(value: HeaderValue) -> HeaderValue {
-    let is_html = value
-        .to_str()
-        .ok()
-        .and_then(|s| s.split(';').next())
-        .map(str::trim)
-        .is_some_and(|essence| essence.eq_ignore_ascii_case("text/html"));
-
-    if is_html {
-        HeaderValue::from_static("text/plain; charset=utf-8")
-    } else {
-        value
-    }
+    HeaderValue::from_str(stored)
+        .unwrap_or_else(|_| HeaderValue::from_static("text/plain; charset=utf-8"))
 }
 
 /// Choose a `Cache-Control` policy from how the id resolved. A live route may
@@ -242,20 +225,15 @@ mod tests {
     }
 
     #[test]
-    fn html_from_filename_extension_is_downgraded() {
-        // A client-chosen .html extension must never yield an active document.
+    fn html_is_served_as_is() {
+        // The blanket `nosniff` + `default-src 'none'; sandbox` headers render
+        // any document inert, so the MIME type is no longer rewritten — HTML
+        // passes through whether it comes from the filename or the stored type.
         let ct = resolve_content_type(Some("page.html"), "text/plain; charset=utf-8");
-        assert_eq!(ct.to_str().unwrap(), "text/plain; charset=utf-8");
-    }
+        assert_eq!(ct.to_str().unwrap(), "text/html");
 
-    #[test]
-    fn html_from_stored_type_is_downgraded() {
-        // Even a snippet stored as HTML is served inert, parameters and all.
         let ct = resolve_content_type(None, "text/html; charset=utf-8");
-        assert_eq!(ct.to_str().unwrap(), "text/plain; charset=utf-8");
-
-        let ct = resolve_content_type(None, "text/html");
-        assert_eq!(ct.to_str().unwrap(), "text/plain; charset=utf-8");
+        assert_eq!(ct.to_str().unwrap(), "text/html; charset=utf-8");
     }
 
     #[test]
