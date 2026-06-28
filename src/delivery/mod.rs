@@ -122,11 +122,10 @@ async fn deliver(
     // format! per request without a validator (the common cold-cache first load)
     // and per mutable-route request where the immutable ETag is never relevant.
     // Carry the string forward into compute_etag to avoid a second format!.
-    let prebuilt_immutable_etag: Option<String> = inm.map(|_| format!("\"{}\"", raw_id));
-    if let (Some(v), Some(s)) = (inm, &prebuilt_immutable_etag)
-        && v.to_str()
-            .map(|sv| sv.trim() == s.as_str())
-            .unwrap_or(false)
+    let immutable_etag = inm.map(|_| format!("\"{}\"", raw_id));
+    if let Some(v) = inm
+        && let Some(s) = immutable_etag.as_deref()
+        && v.to_str().is_ok_and(|sv| sv.trim() == s)
     {
         return build_not_modified(str_to_header(s), cache_control_for(CacheMode::Immutable));
     }
@@ -158,7 +157,7 @@ async fn deliver(
         &snippet.target_hash,
         raw_query,
         state,
-        prebuilt_immutable_etag.as_deref(),
+        immutable_etag.as_deref(),
     );
     if let Some(v) = inm
         && etag_matches(v, &etag)
