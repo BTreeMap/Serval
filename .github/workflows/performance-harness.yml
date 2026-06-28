@@ -122,11 +122,38 @@ jobs:
           # address, which is exactly the pattern the harness creates.
           sudo sysctl -w net.ipv4.tcp_fastopen=3
 
+          # ── Connection teardown & dead-port reclamation ──────────────────────
+          # Keepalive: start probing idle connections after 10s, every 2s,
+          # declaring dead after 3 failed probes (16s total vs 2.5h default).
+          # Trade-off: ~3 extra TCP segments per idle pooled connection per 16s
+          # — negligible on loopback. Benefit: dead connections and their ports
+          # are detected and freed quickly between stages.
+          sudo sysctl -w net.ipv4.tcp_keepalive_time=10
+          sudo sysctl -w net.ipv4.tcp_keepalive_intvl=2
+          sudo sysctl -w net.ipv4.tcp_keepalive_probes=3
+          # Orphan retries: when the client close()s a socket (e.g. after a
+          # request timeout fires), the kernel keeps a FIN_WAIT1 orphan until
+          # the remote ACKs the FIN. The default retry count (~8) can hold
+          # these orphans for ~50s. Setting 2 reclaims them in ~7s.
+          # Trade-off: would RST a FIN whose ACK takes >7s, impossible on
+          # loopback where the server is co-located.
+          sudo sysctl -w net.ipv4.tcp_orphan_retries=2
+          # SYN retries: default 6 means ~127s before giving up on a dropped
+          # SYN. With our large SYN queue (65535) SYN drops are rare, but when
+          # they do occur at the stage collapse boundary we want fast failure.
+          # Setting 3 limits the SYN timeout to ~15s.
+          # Trade-off: if the server recovers from a SYN-drop within 15s,
+          # the connection would have succeeded with the default. Acceptable —
+          # a recovered server at that concurrency still produces inflated
+          # latencies that health-gate logic will classify as unhealthy anyway.
+          sudo sysctl -w net.ipv4.tcp_syn_retries=3
+
       - name: Run performance harness
         run: cargo test --release --features integration --test performance_harness -- --ignored --nocapture
         env:
           SERVAL_SKIP_FRONTEND_BUILD: "1"
           PERF_RESULTS_PATH: target/performance-harness-report.json
+          PERF_REQUEST_TIMEOUT_SECS: "15"
           PERF_LATENCY_SAMPLE_STRIDE: "24"
           PERF_LATENCY_SAMPLE_CAPACITY: "250000"
           PERF_PEAK_INITIAL_CONCURRENCY: "256"

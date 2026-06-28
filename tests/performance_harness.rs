@@ -75,10 +75,24 @@ impl Harness {
         let control_base = serve(api::router(control_state)).await;
         let data_base = serve(delivery::router(data_state)).await;
 
+        // Bound every request so that in-flight connections at extreme
+        // concurrency drain quickly after a stage ends. Without this, workers
+        // await their current get_status() call until the OS TCP connect
+        // timeout (90s), causing the stage join to hang for minutes after the
+        // 8s measurement window closes. The timeout must be long enough that
+        // healthy responses are never cut short (loopback latency is <1ms
+        // under normal load), but short enough to unblock the drain at
+        // pathological concurrency levels.
+        let request_timeout = Duration::from_secs(env_u64("PERF_REQUEST_TIMEOUT_SECS", 15));
+        let client = reqwest::Client::builder()
+            .timeout(request_timeout)
+            .build()
+            .expect("reqwest client");
+
         Self {
             control_base,
             data_base,
-            client: reqwest::Client::new(),
+            client,
             _pg: Arc::new(pg),
         }
     }
