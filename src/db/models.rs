@@ -159,14 +159,23 @@ pub struct DeliveryRecord {
     pub cache_mode: CacheMode,
 }
 
+/// The mutable, un-historied presentation annotations stored on a route: its
+/// `content_type` fallback plus the optional human-readable title and
+/// description. Grouped as one value so every metadata-bearing row shape
+/// declares the set once instead of repeating the three fields.
+#[derive(Debug, Clone)]
+pub struct RouteAnnotations {
+    pub content_type: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+}
+
 /// Routing-layer metadata for a single route, without its content. Used by the
 /// Control Plane to enforce ownership before a write.
 #[derive(Debug, Clone)]
 pub struct RouteMeta {
     pub target_hash: String,
-    pub content_type: String,
-    pub title: Option<String>,
-    pub description: Option<String>,
+    pub annotations: RouteAnnotations,
     pub owner_id: Option<String>,
 }
 
@@ -183,9 +192,7 @@ pub struct HistoryEntry {
 #[derive(Debug, Clone)]
 pub struct RouteSummary {
     pub id: String,
-    pub content_type: String,
-    pub title: Option<String>,
-    pub description: Option<String>,
+    pub annotations: RouteAnnotations,
     pub owner_id: Option<String>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }

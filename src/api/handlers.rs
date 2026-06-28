@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use super::error::ApiError;
 use super::extract::Caller;
 use crate::db::CreateRoute;
-use crate::db::models::{ContentHash, RouteId};
+use crate::db::models::{ContentHash, RouteAnnotations, RouteId};
 use crate::state::ControlState;
 
 const DEFAULT_CONTENT_TYPE: &str = "text/plain; charset=utf-8";
@@ -65,22 +65,41 @@ pub struct RestoreRequest {
     pub target_hash: String,
 }
 
+/// The presentation annotations serialized on every snippet view: the stored
+/// `content_type` plus optional title and description. Flattened into each
+/// response so the wire shape stays flat — the same fields the dashboard has
+/// always received — while the cluster is declared once on the API side.
+#[derive(Debug, Serialize)]
+pub struct SnippetAnnotations {
+    pub content_type: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+}
+
+impl From<RouteAnnotations> for SnippetAnnotations {
+    fn from(a: RouteAnnotations) -> Self {
+        Self {
+            content_type: a.content_type,
+            title: a.title,
+            description: a.description,
+        }
+    }
+}
+
 /// Representation of a route returned to the dashboard.
 #[derive(Debug, Serialize)]
 pub struct SnippetResponse {
     pub id: String,
-    pub content_type: String,
-    pub title: Option<String>,
-    pub description: Option<String>,
+    #[serde(flatten)]
+    pub annotations: SnippetAnnotations,
     pub owner_id: Option<String>,
 }
 /// A compact route listing entry for the dashboard index.
 #[derive(Debug, Serialize)]
 pub struct SnippetSummary {
     pub id: String,
-    pub content_type: String,
-    pub title: Option<String>,
-    pub description: Option<String>,
+    #[serde(flatten)]
+    pub annotations: SnippetAnnotations,
     pub owner_id: Option<String>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -96,9 +115,8 @@ pub struct HistoryItem {
 #[derive(Debug, Serialize)]
 pub struct SnippetDetail {
     pub id: String,
-    pub content_type: String,
-    pub title: Option<String>,
-    pub description: Option<String>,
+    #[serde(flatten)]
+    pub annotations: SnippetAnnotations,
     pub owner_id: Option<String>,
     pub history_count: usize,
     pub history: Vec<HistoryItem>,
@@ -178,9 +196,7 @@ pub async fn list_snippets(
         .into_iter()
         .map(|r| SnippetSummary {
             id: r.id,
-            content_type: r.content_type,
-            title: r.title,
-            description: r.description,
+            annotations: r.annotations.into(),
             owner_id: r.owner_id,
             updated_at: r.updated_at,
         })
@@ -236,9 +252,11 @@ pub async fn create_snippet(
         StatusCode::CREATED,
         Json(SnippetResponse {
             id: id.into_inner(),
-            content_type,
-            title,
-            description,
+            annotations: SnippetAnnotations {
+                content_type,
+                title,
+                description,
+            },
             owner_id,
         }),
     ))
@@ -299,7 +317,7 @@ pub async fn update_snippet(
             }
             normalized
         }
-        None => meta.content_type,
+        None => meta.annotations.content_type,
     };
 
     let title = match req.title {
@@ -310,7 +328,7 @@ pub async fn update_snippet(
             }
             normalized
         }
-        None => meta.title,
+        None => meta.annotations.title,
     };
 
     let description = match req.description {
@@ -325,7 +343,7 @@ pub async fn update_snippet(
             }
             normalized
         }
-        None => meta.description,
+        None => meta.annotations.description,
     };
 
     // Cross-thread invalidation: the next Data Plane GET must see new content.
@@ -333,9 +351,11 @@ pub async fn update_snippet(
 
     Ok(Json(SnippetResponse {
         id: id.into_inner(),
-        content_type,
-        title,
-        description,
+        annotations: SnippetAnnotations {
+            content_type,
+            title,
+            description,
+        },
         owner_id: meta.owner_id,
     }))
 }
@@ -369,9 +389,7 @@ pub async fn get_snippet(
 
     Ok(Json(SnippetDetail {
         id: id.into_inner(),
-        content_type: meta.content_type,
-        title: meta.title,
-        description: meta.description,
+        annotations: meta.annotations.into(),
         owner_id: meta.owner_id,
         history_count,
         history,
@@ -444,9 +462,7 @@ pub async fn restore_snippet(
 
     Ok(Json(SnippetResponse {
         id: id.into_inner(),
-        content_type: meta.content_type,
-        title: meta.title,
-        description: meta.description,
+        annotations: meta.annotations.into(),
         owner_id: meta.owner_id,
     }))
 }

@@ -14,7 +14,8 @@
 use sqlx::PgPool;
 
 use super::models::{
-    CacheMode, ContentHash, DeliveryRecord, HistoryEntry, RouteId, RouteMeta, RouteSummary, User,
+    CacheMode, ContentHash, DeliveryRecord, HistoryEntry, RouteAnnotations, RouteId, RouteMeta,
+    RouteSummary, User,
 };
 
 /// Parameters for creating a new route over a freshly stored content block.
@@ -354,9 +355,11 @@ impl Repository {
         Ok(row.map(
             |(target_hash, content_type, title, description, owner_id)| RouteMeta {
                 target_hash,
-                content_type,
-                title,
-                description,
+                annotations: RouteAnnotations {
+                    content_type,
+                    title,
+                    description,
+                },
                 owner_id,
             },
         ))
@@ -404,9 +407,11 @@ impl Repository {
             .map(
                 |(id, content_type, title, description, owner_id, updated_at)| RouteSummary {
                     id,
-                    content_type,
-                    title,
-                    description,
+                    annotations: RouteAnnotations {
+                        content_type,
+                        title,
+                        description,
+                    },
                     owner_id,
                     updated_at,
                 },
