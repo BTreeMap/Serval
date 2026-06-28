@@ -19,8 +19,9 @@
 //! planes to share one cache handle in one process (see [`crate::cache`]).
 
 use std::borrow::Cow;
-use std::collections::HashMap;
 use std::sync::Arc;
+
+use smallvec::SmallVec;
 
 use bytes::Bytes;
 
@@ -261,14 +262,22 @@ fn etag_matches(inm: &HeaderValue, etag: &HeaderValue) -> bool {
 }
 
 /// Parse the query string into template variables. Repeated keys keep the last
-/// value; percent-encoding is decoded.
-fn parse_query(query: Option<&str>) -> HashMap<String, String> {
+/// value; percent-encoding is decoded lazily — keys and values that need no
+/// decoding remain as borrowed slices into the query string, avoiding heap
+/// allocation on the common clean-key path.
+fn parse_query(query: Option<&str>) -> SmallVec<[(Cow<'_, str>, Cow<'_, str>); 4]> {
     let Some(query) = query else {
-        return HashMap::new();
+        return SmallVec::new();
     };
-    form_urlencoded::parse(query.as_bytes())
-        .map(|(k, v)| (k.into_owned(), v.into_owned()))
-        .collect()
+    let mut out: SmallVec<[(Cow<'_, str>, Cow<'_, str>); 4]> = SmallVec::new();
+    for (k, v) in form_urlencoded::parse(query.as_bytes()) {
+        // Last-value-wins: update in place when the key already exists.
+        match out.iter_mut().find(|(ek, _)| *ek == k) {
+            Some((_, ev)) => *ev = v,
+            None => out.push((k, v)),
+        }
+    }
+    out
 }
 
 /// Resolve the response MIME type: prefer the filename extension, falling back
@@ -317,11 +326,17 @@ fn str_to_header(s: &str) -> HeaderValue {
 mod tests {
     use super::*;
 
+    fn find_var<'a>(vars: &'a [(Cow<'a, str>, Cow<'a, str>)], key: &str) -> Option<&'a str> {
+        vars.iter()
+            .find(|(k, _)| k.as_ref() == key)
+            .map(|(_, v)| v.as_ref())
+    }
+
     #[test]
     fn parse_query_decodes_and_dedupes() {
         let vars = parse_query(Some("port=8080&name=hello%20world&port=9090"));
-        assert_eq!(vars.get("name").unwrap(), "hello world");
-        assert_eq!(vars.get("port").unwrap(), "9090", "last value wins");
+        assert_eq!(find_var(&vars, "name"), Some("hello world"));
+        assert_eq!(find_var(&vars, "port"), Some("9090"), "last value wins");
     }
 
     #[test]

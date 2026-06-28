@@ -130,7 +130,7 @@ impl IdSigner {
     #[must_use]
     pub fn random_id(&self) -> String {
         let mut prefix = [0u8; PREFIX_LEN];
-        rand::thread_rng().fill_bytes(&mut prefix);
+        rand::rng().fill_bytes(&mut prefix);
         self.assemble(prefix)
     }
 

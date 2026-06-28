@@ -1206,7 +1206,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.4",
+ "socket2",
  "tokio",
  "tower-service",
  "tracing",
@@ -1954,7 +1954,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.6.4",
+ "socket2",
  "thiserror",
  "tokio",
  "tracing",
@@ -1991,7 +1991,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.4",
+ "socket2",
  "tracing",
  "windows-sys 0.60.2",
 ]
@@ -2555,13 +2555,14 @@ dependencies = [
  "jsonwebtoken",
  "mime_guess",
  "moka",
- "rand 0.8.6",
+ "rand 0.9.4",
  "regex",
  "reqwest",
  "rust-embed",
  "serde",
  "serde_json",
- "socket2 0.5.10",
+ "smallvec",
+ "socket2",
  "sqlx",
  "subtle",
  "testcontainers",
@@ -2656,16 +2657,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
 dependencies = [
  "serde",
-]
-
-[[package]]
-name = "socket2"
-version = "0.5.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e22376abed350d73dd1cd119b57ffccad95b4e585a7cda43e286245ce23c0678"
-dependencies = [
- "libc",
- "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3115,7 +3106,7 @@ dependencies = [
  "mio",
  "pin-project-lite",
  "signal-hook-registry",
- "socket2 0.6.4",
+ "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",
 ]
@@ -3184,7 +3175,7 @@ dependencies = [
  "hyper-util",
  "percent-encoding",
  "pin-project",
- "socket2 0.6.4",
+ "socket2",
  "sync_wrapper",
  "tokio",
  "tokio-stream",
