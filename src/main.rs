@@ -6,9 +6,8 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use socket2::{Domain, Protocol, Socket, Type};
 use std::net::SocketAddr;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpSocket};
 use tokio::signal;
 
 use serval::auth::AuthService;
@@ -123,6 +122,7 @@ async fn serve(config: Config, repo: Repository) -> Result<()> {
     // The kernel distributes incoming SYNs across all listening sockets,
     // eliminating the single accept-loop bottleneck: each worker thread gets
     // its own kernel-side accept queue and accepts connections independently.
+    // Uses tokio::net::TcpSocket directly — no socket2 dependency needed.
     let worker_threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4)
@@ -130,22 +130,21 @@ async fn serve(config: Config, repo: Repository) -> Result<()> {
     let delivery_addr: SocketAddr = config.data_plane_addr;
     let mut delivery_listeners = Vec::with_capacity(worker_threads);
     for _ in 0..worker_threads {
-        let sock = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))
-            .context("socket2: create delivery socket")?;
-        sock.set_reuse_port(true)
-            .context("socket2: SO_REUSEPORT on delivery socket")?;
-        sock.set_reuse_address(true)
-            .context("socket2: SO_REUSEADDR on delivery socket")?;
-        sock.set_nonblocking(true)
-            .context("socket2: set_nonblocking on delivery socket")?;
-        sock.bind(&delivery_addr.into())
-            .with_context(|| format!("socket2: bind delivery socket to {delivery_addr}"))?;
-        sock.listen(65535)
-            .context("socket2: listen on delivery socket")?;
-        let std_listener = std::net::TcpListener::from(sock);
-        let tokio_listener = TcpListener::from_std(std_listener)
-            .context("socket2: convert delivery socket to tokio TcpListener")?;
-        delivery_listeners.push(tokio_listener);
+        let sock = match delivery_addr {
+            SocketAddr::V4(_) => TcpSocket::new_v4(),
+            SocketAddr::V6(_) => TcpSocket::new_v6(),
+        }
+        .context("tokio: create delivery socket")?;
+        sock.set_reuseport(true)
+            .context("tokio: SO_REUSEPORT on delivery socket")?;
+        sock.set_reuseaddr(true)
+            .context("tokio: SO_REUSEADDR on delivery socket")?;
+        sock.bind(delivery_addr)
+            .with_context(|| format!("tokio: bind delivery socket to {delivery_addr}"))?;
+        let listener = sock
+            .listen(65535)
+            .context("tokio: listen on delivery socket")?;
+        delivery_listeners.push(listener);
     }
 
     tracing::info!(

@@ -79,10 +79,6 @@ mime_guess = "2"
 # Zero-copy response bodies: Bytes::from_owner wraps Arc<str> without memcpy
 bytes = "1"
 
-# SO_REUSEPORT: bind one delivery socket per worker thread to eliminate the
-# single accept-loop bottleneck at extreme connection rates.
-socket2 = "0.6"
-
 # Embedded frontend (virtual file system)
 rust-embed = { version = "8", features = ["mime-guess"] }
 
