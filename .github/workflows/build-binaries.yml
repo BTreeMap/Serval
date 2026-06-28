@@ -26,7 +26,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             asset_name: serval-linux-amd64
             bin: serval
@@ -36,11 +36,11 @@ jobs:
             target: aarch64-unknown-linux-gnu
             asset_name: serval-linux-arm64
             bin: serval
-          - os: macos-latest
+          - os: macos-26
             target: aarch64-apple-darwin
             asset_name: serval-macos-arm64
             bin: serval
-          - os: macos-13
+          - os: macos-26-intel
             target: x86_64-apple-darwin
             asset_name: serval-macos-amd64
             bin: serval
