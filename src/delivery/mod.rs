@@ -101,7 +101,9 @@ async fn deliver(
     headers: &HeaderMap,
 ) -> Response {
     // Reject anything that is not a well-formed 64-char id without touching the
-    // database. Indistinguishable from "not found" to avoid id probing.
+    // database. The structural check (length, then charset) sheds malformed
+    // junk before the id is materialized — and before the keyed-MAC verify
+    // below — so it is the cheap pre-gate. Indistinguishable from "not found".
     let Ok(id) = RouteId::parse(raw_id) else {
         return StatusCode::NOT_FOUND.into_response();
     };

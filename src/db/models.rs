@@ -17,8 +17,17 @@ use crate::crypto::ID_LEN;
 /// A content hash shares this exact format (it is itself a valid, signed id),
 /// so the Data Plane can address a specific stored version directly — but that
 /// is an internal delivery detail, never a separate user-facing kind of route.
+///
+/// Backed by an `Arc<str>` rather than a `String`. The Data Plane allocates the
+/// id exactly once (at [`parse`](Self::parse)); the cache must then own the key
+/// for longer than the request, and the loader closure needs its own copy. With
+/// shared ownership those follow-on copies — `clone` for the closure and moka's
+/// internal key clone on insert — are atomic refcount bumps, never fresh 64-byte
+/// heap allocations. Borrowing stays a plain, safe deref via [`as_str`].
+///
+/// [`as_str`]: Self::as_str
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct RouteId(String);
+pub struct RouteId(std::sync::Arc<str>);
 
 /// Error returned when a candidate route id fails validation.
 #[derive(Debug, thiserror::Error)]
@@ -31,6 +40,10 @@ pub enum RouteIdError {
 
 impl RouteId {
     /// Parse and validate an untrusted id (e.g. from a request path).
+    ///
+    /// The structural checks (length, then charset) run before the id is
+    /// materialized, so malformed input is rejected without any allocation;
+    /// only a well-formed id is interned into the single shared `Arc<str>`.
     pub fn parse(raw: &str) -> Result<Self, RouteIdError> {
         if raw.len() != ID_LEN {
             return Err(RouteIdError::WrongLength(raw.len()));
@@ -41,7 +54,7 @@ impl RouteId {
         {
             return Err(RouteIdError::InvalidCharacter);
         }
-        Ok(Self(raw.to_owned()))
+        Ok(Self(std::sync::Arc::from(raw)))
     }
 
     /// Adopt a freshly-minted, already-signed id from [`crypto::IdSigner`].
@@ -51,7 +64,7 @@ impl RouteId {
     #[must_use]
     pub fn from_signed(id: String) -> Self {
         debug_assert_eq!(id.len(), ID_LEN, "signer must emit {ID_LEN}-char ids");
-        Self(id)
+        Self(std::sync::Arc::from(id))
     }
 
     /// Borrow the id as a string slice.
@@ -60,10 +73,11 @@ impl RouteId {
         &self.0
     }
 
-    /// Consume the newtype, yielding the owned string.
+    /// Consume the newtype, yielding an owned string. Used only on cold Control
+    /// Plane response paths, never on the Data Plane hot path.
     #[must_use]
     pub fn into_inner(self) -> String {
-        self.0
+        self.0.as_ref().to_owned()
     }
 }
 

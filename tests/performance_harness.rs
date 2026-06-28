@@ -567,9 +567,18 @@ async fn run_adversarial_stage(
     // resolve naturally (via the per-request timeout), then abort stragglers.
     // Without this bound, a completely-overwhelmed server at extreme forged
     // concurrency can leave 25K+ tasks blocked for minutes, hanging the stage.
-    // Aborted tasks do not update the shared atomics, so the rejection-rate
-    // measurement is based only on requests that completed — this is fine for
-    // health classification, which will already be UNHEALTHY at this scale.
+    //
+    // Dropping a `JoinHandle` only *detaches* its task — it keeps running and
+    // keeps issuing forged requests against the server. Left unbounded, each
+    // stage's leaked workers pile onto the next stage's fresh ones, so the
+    // forged load compounds across stages and the harness appears stuck for
+    // tens of minutes. We therefore capture an `AbortHandle` per task up front
+    // and, if the drain budget elapses, explicitly `abort()` every straggler so
+    // no worker survives its stage. Aborted tasks do not update the shared
+    // atomics, so the rejection-rate measurement is based only on requests that
+    // completed — fine for health classification, which is already UNHEALTHY at
+    // this scale.
+    let forged_abort_handles: Vec<_> = forged_tasks.iter().map(|t| t.abort_handle()).collect();
     let drain_secs = env_u64("PERF_REQUEST_TIMEOUT_SECS", 15) + 3;
     let drain_result = tokio::time::timeout(Duration::from_secs(drain_secs), async {
         for task in forged_tasks {
@@ -578,7 +587,13 @@ async fn run_adversarial_stage(
     })
     .await;
     if drain_result.is_err() {
-        eprintln!("[adv    ] stage drain timed out after {drain_secs}s — stragglers abandoned");
+        for handle in &forged_abort_handles {
+            handle.abort();
+        }
+        eprintln!(
+            "[adv    ] stage drain timed out after {drain_secs}s — {} stragglers aborted",
+            forged_abort_handles.len()
+        );
     }
 
     let legit = legit_stats.snapshot(start.elapsed()).await;
