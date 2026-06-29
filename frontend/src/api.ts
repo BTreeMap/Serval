@@ -180,6 +180,11 @@ async function extractError(response: Response): Promise<string> {
     return response.statusText || `request failed with status ${response.status}`;
 }
 
+/** Coerce all carriage returns and CRLF pairs to a standard LF newline. */
+function normalizeNewlines(text: string): string {
+    return text.replace(/\r\n|\r/g, "\n");
+}
+
 export const api = {
     authInfo(): Promise<AuthInfo> {
         return request<AuthInfo>("/api/auth-info");
@@ -229,9 +234,13 @@ export const api = {
     },
 
     createSnippet(payload: CreateRequest): Promise<SnippetResponse> {
+        const normalizedPayload = {
+            ...payload,
+            content: normalizeNewlines(payload.content),
+        };
         return request<SnippetResponse>("/api/snippets", {
             method: "POST",
-            json: payload,
+            json: normalizedPayload,
         });
     },
 
@@ -240,9 +249,13 @@ export const api = {
     },
 
     updateSnippet(id: string, update: UpdateRequest): Promise<SnippetResponse> {
+        const normalizedUpdate = { ...update };
+        if (normalizedUpdate.content !== undefined) {
+            normalizedUpdate.content = normalizeNewlines(normalizedUpdate.content);
+        }
         return request<SnippetResponse>(`/api/snippets/${encodeURIComponent(id)}`, {
             method: "PATCH",
-            json: update,
+            json: normalizedUpdate,
         });
     },
 
