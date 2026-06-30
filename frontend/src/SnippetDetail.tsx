@@ -120,9 +120,14 @@ function Editor({ id, onUpdated }: { id: string; onUpdated: () => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Single source of truth for submittability: the handler guard and the
+  // button's disabled state derive from the same predicate, so the UI can
+  // never offer an action the handler would reject.
+  const canSubmit = content.length > 0;
+
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (!content) {
+    if (!canSubmit) {
       return;
     }
     setBusy(true);
@@ -150,7 +155,7 @@ function Editor({ id, onUpdated }: { id: string; onUpdated: () => void }) {
           aria-label="New version content"
         />
         {error && <Banner tone="error">{error}</Banner>}
-        <Button type="submit" loading={busy}>
+        <Button type="submit" loading={busy} disabled={!canSubmit}>
           {busy ? "Publishing…" : "Publish update"}
         </Button>
       </form>

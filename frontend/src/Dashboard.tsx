@@ -146,9 +146,14 @@ function CreateForm({ onCreated }: { onCreated: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [created, setCreated] = useState<SnippetResponse | null>(null);
 
+  // Single source of truth for submittability: the handler guard and the
+  // button's disabled state derive from the same predicate, so the UI can
+  // never offer an action the handler would reject.
+  const canSubmit = content.length > 0;
+
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (!content) {
+    if (!canSubmit) {
       return;
     }
     setBusy(true);
@@ -217,7 +222,12 @@ function CreateForm({ onCreated }: { onCreated: () => void }) {
             placeholder="content type"
             className="sm:flex-1"
           />
-          <Button type="submit" loading={busy} className="w-full sm:w-auto">
+          <Button
+            type="submit"
+            loading={busy}
+            disabled={!canSubmit}
+            className="w-full sm:w-auto"
+          >
             {busy ? "Creating…" : "Create"}
           </Button>
         </div>
