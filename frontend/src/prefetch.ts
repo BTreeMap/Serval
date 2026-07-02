@@ -23,23 +23,26 @@ export interface PrefetchTuning {
      *  does not fire a request — only lingering (an intent-to-click signal)
      *  does. */
     hoverIntentMs: number;
-    /** How long a warmed entry stays usable. Deliberately short: this cache has
-     *  no invalidation channel, so its TTL is the sole freshness bound and — as
-     *  the entry's data is fetched at prefetch time — the exact upper bound on
-     *  how stale a warmed response can be. It only needs to bridge hover intent
-     *  → click → route change → mount (a sub-second hop), so it is kept to a
-     *  modest margin over that; a miss simply falls back to a fresh fetch. */
+    /** How long a warmed entry stays usable. This cache has no invalidation
+     *  channel, so its TTL is the sole freshness bound and — as the entry's
+     *  data is fetched at prefetch time — the exact upper bound on how stale a
+     *  warmed response can be. It must outlast the human decision gap between
+     *  hovering a link and committing to the click (read the row → decide →
+     *  click → route change → mount), whose long tail runs a few seconds; a
+     *  miss simply falls back to a fresh fetch, so erring short only costs a
+     *  spinner, never correctness. */
     ttlMs: number;
 }
 
 /** instant.page's researched default: it warms after ~65 ms of hover intent.
  *  The TTL is Serval-specific — instant.page relies on HTTP caching for
- *  freshness, but this JS cache has no invalidation hook, so we keep it to just
- *  over the sub-second hover→mount hop, bounding how stale a warmed response can
- *  ever be against a concurrent admin edit. */
+ *  freshness, but this JS cache has no invalidation hook. 3 s covers the bulk
+ *  of the hover→click decision-time distribution (whose median is ~300 ms but
+ *  whose deliberate tail runs to a few seconds) while keeping the worst-case
+ *  staleness against a concurrent admin edit trivially small. */
 export const PREFETCH_DEFAULTS: PrefetchTuning = {
     hoverIntentMs: 65,
-    ttlMs: 1_000,
+    ttlMs: 3_000,
 };
 
 /** Stable cache keys, namespaced so distinct resources never collide. */
