@@ -9,6 +9,10 @@
 // Instead the in-flight promise is stashed in a tiny module-level cache keyed
 // by an opaque string that the destination view consumes on mount, turning the
 // usual loading spinner into an already-resolved response.
+//
+// The cache is plain in-memory JS state (a module-level Map) — it uses no
+// storage API, so a full browser refresh tears down the runtime, re-runs this
+// module, and the cache comes back empty. Nothing here survives a reload.
 
 import { useCallback, useEffect, useMemo, useRef } from "react";
 
@@ -19,22 +23,23 @@ export interface PrefetchTuning {
      *  does not fire a request — only lingering (an intent-to-click signal)
      *  does. */
     hoverIntentMs: number;
-    /** How long a warmed entry stays usable. Deliberately short: this cache
-     *  has no invalidation channel, so its TTL is the sole freshness bound. It
-     *  only needs to bridge hover intent → click → route change → mount (a
-     *  sub-second hop), and must expire well before a concurrent editor's
-     *  change could be masked by a stale warmed response. */
+    /** How long a warmed entry stays usable. Deliberately short: this cache has
+     *  no invalidation channel, so its TTL is the sole freshness bound and — as
+     *  the entry's data is fetched at prefetch time — the exact upper bound on
+     *  how stale a warmed response can be. It only needs to bridge hover intent
+     *  → click → route change → mount (a sub-second hop), so it is kept to a
+     *  modest margin over that; a miss simply falls back to a fresh fetch. */
     ttlMs: number;
 }
 
 /** instant.page's researched default: it warms after ~65 ms of hover intent.
  *  The TTL is Serval-specific — instant.page relies on HTTP caching for
- *  freshness, but this JS cache has no invalidation hook, so we keep it just
- *  long enough to cover the hover→mount hop and no longer, bounding how stale a
- *  warmed response can ever be against a concurrent admin edit. */
+ *  freshness, but this JS cache has no invalidation hook, so we keep it to just
+ *  over the sub-second hover→mount hop, bounding how stale a warmed response can
+ *  ever be against a concurrent admin edit. */
 export const PREFETCH_DEFAULTS: PrefetchTuning = {
     hoverIntentMs: 65,
-    ttlMs: 5_000,
+    ttlMs: 1_000,
 };
 
 /** Stable cache keys, namespaced so distinct resources never collide. */
