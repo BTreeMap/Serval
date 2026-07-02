@@ -15,8 +15,8 @@ use super::error::ApiError;
 use super::extract::Caller;
 use super::pagination::{HistoryCursor, PageLimit, SnippetsCursor, take_page};
 use crate::crypto::IdSigner;
-use crate::db::CreateRoute;
 use crate::db::models::{ContentHash, HistoryEntry, RouteAnnotations, RouteId};
+use crate::db::{CreateRoute, RouteMetadataPatch};
 use crate::state::ControlState;
 
 const DEFAULT_CONTENT_TYPE: &str = "text/plain; charset=utf-8";
@@ -377,55 +377,45 @@ pub async fn update_snippet(
         }
     }
 
-    // Presentation metadata is not a content version, so changing it records no
-    // history entry.
-    let content_type = match req.content_type {
-        Some(requested) => {
-            let normalized = normalize_content_type(Some(requested))?;
-            if !state.repo.set_content_type(&id, &normalized).await? {
-                return Err(ApiError::NotFound);
-            }
-            normalized
-        }
-        None => meta.annotations.content_type,
-    };
+    let content_type_patch = req
+        .content_type
+        .map(|requested| normalize_content_type(Some(requested)))
+        .transpose()?;
+    let title_patch = req
+        .title
+        .map(|raw| normalize_annotation(Some(raw), "title", MAX_TITLE_LEN))
+        .transpose()?;
+    let description_patch = req
+        .description
+        .map(|raw| normalize_annotation(Some(raw), "description", MAX_DESCRIPTION_LEN))
+        .transpose()?;
 
-    let title = match req.title {
-        Some(raw) => {
-            let normalized = normalize_annotation(Some(raw), "title", MAX_TITLE_LEN)?;
-            if !state.repo.set_title(&id, normalized.as_deref()).await? {
-                return Err(ApiError::NotFound);
-            }
-            normalized
-        }
-        None => meta.annotations.title,
-    };
-
-    let description = match req.description {
-        Some(raw) => {
-            let normalized = normalize_annotation(Some(raw), "description", MAX_DESCRIPTION_LEN)?;
-            if !state
+    // Presentation metadata is not a content version, so changing any subset
+    // of fields records no history entry and is handled by one UPDATE.
+    let annotations =
+        if content_type_patch.is_some() || title_patch.is_some() || description_patch.is_some() {
+            state
                 .repo
-                .set_description(&id, normalized.as_deref())
+                .update_route_metadata(
+                    &id,
+                    RouteMetadataPatch {
+                        content_type: content_type_patch.as_deref(),
+                        title: title_patch.as_ref().map(|v| v.as_deref()),
+                        description: description_patch.as_ref().map(|v| v.as_deref()),
+                    },
+                )
                 .await?
-            {
-                return Err(ApiError::NotFound);
-            }
-            normalized
-        }
-        None => meta.annotations.description,
-    };
+                .ok_or(ApiError::NotFound)?
+        } else {
+            meta.annotations
+        };
 
     // Cross-thread invalidation: the next Data Plane GET must see new content.
     state.cache.invalidate(&id).await;
 
     Ok(Json(SnippetResponse {
         id: id.into_inner(),
-        annotations: RouteAnnotations {
-            content_type,
-            title,
-            description,
-        },
+        annotations,
         owner_id: meta.owner_id,
     }))
 }
@@ -444,27 +434,28 @@ pub async fn get_snippet(
     let id = RouteId::parse(&raw_id).map_err(|e| ApiError::BadRequest(e.to_string()))?;
     let limit = PageLimit::parse(query.parsed_limit()?)?;
 
-    let meta = state
+    let detail_page = state
         .repo
-        .fetch_route_meta(&id)
+        .fetch_route_detail_page(&id, limit.as_i64() + 1)
         .await?
         .ok_or(ApiError::NotFound)?;
+    let meta = detail_page.meta;
 
     authorize_write(&caller, meta.owner_id.as_deref())?;
 
-    let history_count = state.repo.history_count(&id).await?;
-    let rows = state
-        .repo
-        .list_history_page(&id, None, limit.as_i64() + 1)
-        .await?;
-    let (history, history_next_cursor) =
-        build_history_page(rows, limit, history_count, 0, &state.signer);
+    let (history, history_next_cursor) = build_history_page(
+        detail_page.history,
+        limit,
+        detail_page.history_count,
+        0,
+        &state.signer,
+    );
 
     Ok(Json(SnippetDetail {
         id: id.into_inner(),
         annotations: meta.annotations,
         owner_id: meta.owner_id,
-        history_count,
+        history_count: detail_page.history_count,
         history,
         history_next_cursor,
         history_limit: limit.as_u32(),

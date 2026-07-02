@@ -14,8 +14,8 @@
 use sqlx::PgPool;
 
 use super::models::{
-    CacheMode, ContentHash, DeliveryRecord, HistoryEntry, RouteAnnotations, RouteId, RouteMeta,
-    RouteSummary, User,
+    CacheMode, ContentHash, DeliveryRecord, HistoryEntry, RouteAnnotations, RouteDetailPage,
+    RouteId, RouteMeta, RouteSummary, User,
 };
 
 /// Parameters for creating a new route over a freshly stored content block.
@@ -28,6 +28,14 @@ pub struct CreateRoute<'a> {
     pub description: Option<&'a str>,
     pub owner_id: Option<&'a str>,
     pub editor_id: &'a str,
+}
+
+/// Partial route metadata update. `None` means "leave as-is"; `Some(None)`
+/// means "clear this nullable annotation".
+pub struct RouteMetadataPatch<'a> {
+    pub content_type: Option<&'a str>,
+    pub title: Option<Option<&'a str>>,
+    pub description: Option<Option<&'a str>>,
 }
 
 /// CAS repository over a shared PostgreSQL pool.
@@ -64,11 +72,18 @@ impl Repository {
         .execute(&mut *tx)
         .await?;
 
-        let inserted = sqlx::query(
+        let history_id = sqlx::query_scalar::<_, i64>(
             r"
-            INSERT INTO routes (id, target_hash, content_type, title, description, owner_id)
-            VALUES ($1, $2, $3, $4, $5, $6)
-            ON CONFLICT (id) DO NOTHING
+            WITH inserted_route AS (
+                INSERT INTO routes (id, target_hash, content_type, title, description, owner_id)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                ON CONFLICT (id) DO NOTHING
+                RETURNING id
+            )
+            INSERT INTO pointer_history (route_id, target_hash, editor_id)
+            SELECT id, $2, $7
+            FROM inserted_route
+            RETURNING id
             ",
         )
         .bind(params.id.as_str())
@@ -77,18 +92,15 @@ impl Repository {
         .bind(params.title)
         .bind(params.description)
         .bind(params.owner_id)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
+        .bind(params.editor_id)
+        .fetch_optional(&mut *tx)
+        .await?;
 
-        if inserted == 0 {
+        if history_id.is_none() {
             // Route already existed; leave the ledger untouched.
             tx.rollback().await?;
             return Ok(false);
         }
-
-        self.append_history(&mut tx, &params.id, &params.hash, params.editor_id)
-            .await?;
 
         tx.commit().await?;
         Ok(true)
@@ -116,75 +128,71 @@ impl Repository {
         .execute(&mut *tx)
         .await?;
 
-        let updated = sqlx::query("UPDATE routes SET target_hash = $2 WHERE id = $1")
-            .bind(id.as_str())
-            .bind(hash.as_str())
-            .execute(&mut *tx)
-            .await?
-            .rows_affected();
+        let history_id = sqlx::query_scalar::<_, i64>(
+            r"
+            WITH updated_route AS (
+                UPDATE routes
+                SET target_hash = $2
+                WHERE id = $1
+                RETURNING id
+            )
+            INSERT INTO pointer_history (route_id, target_hash, editor_id)
+            SELECT id, $2, $3
+            FROM updated_route
+            RETURNING id
+            ",
+        )
+        .bind(id.as_str())
+        .bind(hash.as_str())
+        .bind(editor_id)
+        .fetch_optional(&mut *tx)
+        .await?;
 
-        if updated == 0 {
+        if history_id.is_none() {
             tx.rollback().await?;
             return Ok(false);
         }
-
-        self.append_history(&mut tx, id, hash, editor_id).await?;
 
         tx.commit().await?;
         Ok(true)
     }
 
-    /// Update only a route's presentation metadata — its stored `content_type`
-    /// fallback — without touching the content pointer or the history ledger.
-    ///
-    /// `content_type` is metadata on the mutable route, not a content version,
-    /// so this records no `pointer_history` row. Returns `Ok(false)` if the
-    /// route does not exist.
-    pub async fn set_content_type(
+    /// Update only route presentation metadata without touching the content
+    /// pointer or history ledger. Each field has an explicit "set this field"
+    /// boolean so nullable annotations can distinguish "clear to NULL" from
+    /// "leave unchanged" in one stable query shape.
+    pub async fn update_route_metadata(
         &self,
         id: &RouteId,
-        content_type: &str,
-    ) -> Result<bool, sqlx::Error> {
-        let updated = sqlx::query("UPDATE routes SET content_type = $2 WHERE id = $1")
-            .bind(id.as_str())
-            .bind(content_type)
-            .execute(&self.pool)
-            .await?
-            .rows_affected();
+        patch: RouteMetadataPatch<'_>,
+    ) -> Result<Option<RouteAnnotations>, sqlx::Error> {
+        let row = sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
+            r"
+            UPDATE routes
+            SET content_type = CASE WHEN $2 THEN $3::varchar ELSE content_type END,
+                title = CASE WHEN $4 THEN $5::varchar ELSE title END,
+                description = CASE WHEN $6 THEN $7::text ELSE description END
+            WHERE id = $1
+            RETURNING content_type, title, description
+            ",
+        )
+        .bind(id.as_str())
+        .bind(patch.content_type.is_some())
+        .bind(patch.content_type)
+        .bind(patch.title.is_some())
+        .bind(patch.title.flatten())
+        .bind(patch.description.is_some())
+        .bind(patch.description.flatten())
+        .fetch_optional(&self.pool)
+        .await?;
 
-        Ok(updated != 0)
-    }
-
-    /// Update only a route's optional title annotation without touching the
-    /// content pointer or the history ledger. Pass `None` to clear the title.
-    /// Returns `Ok(false)` if the route does not exist.
-    pub async fn set_title(&self, id: &RouteId, title: Option<&str>) -> Result<bool, sqlx::Error> {
-        let updated = sqlx::query("UPDATE routes SET title = $2 WHERE id = $1")
-            .bind(id.as_str())
-            .bind(title)
-            .execute(&self.pool)
-            .await?
-            .rows_affected();
-
-        Ok(updated != 0)
-    }
-
-    /// Update only a route's optional description annotation without touching
-    /// the content pointer or the history ledger. Pass `None` to clear it.
-    /// Returns `Ok(false)` if the route does not exist.
-    pub async fn set_description(
-        &self,
-        id: &RouteId,
-        description: Option<&str>,
-    ) -> Result<bool, sqlx::Error> {
-        let updated = sqlx::query("UPDATE routes SET description = $2 WHERE id = $1")
-            .bind(id.as_str())
-            .bind(description)
-            .execute(&self.pool)
-            .await?
-            .rows_affected();
-
-        Ok(updated != 0)
+        Ok(
+            row.map(|(content_type, title, description)| RouteAnnotations {
+                content_type,
+                title,
+                description,
+            }),
+        )
     }
 
     /// The Data Plane read path, resolved in a single round trip.
@@ -323,7 +331,7 @@ impl Repository {
             ),
         >(
             r"
-            SELECT id, is_admin, created_at, last_seen_at
+            SELECT id, TRUE AS is_admin, created_at, last_seen_at
             FROM users
             WHERE is_admin = TRUE
             ORDER BY last_seen_at DESC
@@ -366,6 +374,112 @@ impl Repository {
         ))
     }
 
+    /// Fetch route metadata, the exact ledger count, and the newest bounded
+    /// history page in one round trip for the snippet detail endpoint.
+    pub async fn fetch_route_detail_page(
+        &self,
+        id: &RouteId,
+        fetch_limit: i64,
+    ) -> Result<Option<RouteDetailPage>, sqlx::Error> {
+        type Row = (
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            i64,
+            Option<i64>,
+            Option<String>,
+            Option<String>,
+            Option<chrono::DateTime<chrono::Utc>>,
+        );
+
+        let rows = sqlx::query_as::<_, Row>(
+            r"
+            WITH route_meta AS (
+                SELECT target_hash, content_type, title, description, owner_id
+                FROM routes
+                WHERE id = $1
+            )
+            SELECT rm.target_hash,
+                   rm.content_type,
+                   rm.title,
+                   rm.description,
+                   rm.owner_id,
+                   totals.history_count,
+                   history.id,
+                   history.target_hash,
+                   history.editor_id,
+                   history.changed_at
+            FROM route_meta rm
+            CROSS JOIN LATERAL (
+                SELECT COUNT(*) AS history_count
+                FROM pointer_history
+                WHERE route_id = $1
+            ) totals
+            LEFT JOIN LATERAL (
+                SELECT id, target_hash, editor_id, changed_at
+                FROM pointer_history
+                WHERE route_id = $1
+                ORDER BY changed_at DESC, id DESC
+                LIMIT $2
+            ) history ON TRUE
+            ORDER BY history.changed_at DESC NULLS LAST, history.id DESC NULLS LAST
+            ",
+        )
+        .bind(id.as_str())
+        .bind(fetch_limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let Some((
+            target_hash,
+            content_type,
+            title,
+            description,
+            owner_id,
+            history_count,
+            _,
+            _,
+            _,
+            _,
+        )) = rows.first()
+        else {
+            return Ok(None);
+        };
+
+        let meta = RouteMeta {
+            target_hash: target_hash.clone(),
+            annotations: RouteAnnotations {
+                content_type: content_type.clone(),
+                title: title.clone(),
+                description: description.clone(),
+            },
+            owner_id: owner_id.clone(),
+        };
+        let history_count = *history_count;
+
+        let history = rows
+            .into_iter()
+            .filter_map(
+                |(_, _, _, _, _, _, id, target_hash, editor_id, changed_at)| {
+                    Some(HistoryEntry {
+                        id: id?,
+                        target_hash: target_hash?,
+                        editor_id: editor_id?,
+                        changed_at: changed_at?,
+                    })
+                },
+            )
+            .collect();
+
+        Ok(Some(RouteDetailPage {
+            meta,
+            history_count,
+            history,
+        }))
+    }
+
     /// List a page of a user's routes, most recently changed first. The
     /// "last changed" timestamp is read from the head of each route's history
     /// ledger via a per-route `LATERAL` lookup, so the listing reflects
@@ -395,26 +509,23 @@ impl Repository {
         let rows = if let Some((after_updated_at, after_id)) = after {
             sqlx::query_as::<_, Row>(
                 r"
-                SELECT id, content_type, title, description, owner_id, updated_at
-                FROM (
-                    SELECT r.id,
-                           r.content_type,
-                           r.title,
-                           r.description,
-                           r.owner_id,
-                           COALESCE(latest.changed_at, NOW()) AS updated_at
-                    FROM routes r
-                    LEFT JOIN LATERAL (
-                        SELECT h.changed_at
-                        FROM pointer_history h
-                        WHERE h.route_id = r.id
-                        ORDER BY h.changed_at DESC, h.id DESC
-                        LIMIT 1
-                    ) latest ON TRUE
-                    WHERE r.owner_id = $1
-                ) page
-                WHERE (updated_at, id) < ($2, $3)
-                ORDER BY updated_at DESC, id DESC
+                SELECT r.id,
+                       r.content_type,
+                       r.title,
+                       r.description,
+                       r.owner_id,
+                       latest.changed_at AS updated_at
+                FROM routes r
+                JOIN LATERAL (
+                    SELECT h.changed_at
+                    FROM pointer_history h
+                    WHERE h.route_id = r.id
+                    ORDER BY h.changed_at DESC, h.id DESC
+                    LIMIT 1
+                ) latest ON TRUE
+                WHERE r.owner_id = $1
+                  AND (latest.changed_at, r.id) < ($2, $3)
+                ORDER BY latest.changed_at DESC, r.id DESC
                 LIMIT $4
                 ",
             )
@@ -432,9 +543,9 @@ impl Repository {
                        r.title,
                        r.description,
                        r.owner_id,
-                       COALESCE(latest.changed_at, NOW()) AS updated_at
+                       latest.changed_at AS updated_at
                 FROM routes r
-                LEFT JOIN LATERAL (
+                JOIN LATERAL (
                     SELECT h.changed_at
                     FROM pointer_history h
                     WHERE h.route_id = r.id
@@ -442,7 +553,7 @@ impl Repository {
                     LIMIT 1
                 ) latest ON TRUE
                 WHERE r.owner_id = $1
-                ORDER BY updated_at DESC, id DESC
+                ORDER BY latest.changed_at DESC, r.id DESC
                 LIMIT $2
                 ",
             )
@@ -542,12 +653,11 @@ impl Repository {
         let row = sqlx::query_as::<_, (String,)>(
             r"
             SELECT c.content
-            FROM content_blocks c
-            WHERE c.hash_id = $2
-              AND EXISTS (
-                  SELECT 1 FROM pointer_history h
-                  WHERE h.route_id = $1 AND h.target_hash = $2
-              )
+            FROM pointer_history h
+            JOIN content_blocks c ON c.hash_id = h.target_hash
+            WHERE h.route_id = $1
+              AND h.target_hash = $2
+            LIMIT 1
             ",
         )
         .bind(id.as_str())
@@ -568,64 +678,32 @@ impl Repository {
         hash: &ContentHash,
         editor_id: &str,
     ) -> Result<bool, sqlx::Error> {
-        let mut tx = self.pool.begin().await?;
-
-        // The target must be a genuine prior version of this exact route.
-        let (is_version,) = sqlx::query_as::<_, (bool,)>(
+        let history_id = sqlx::query_scalar::<_, i64>(
             r"
-            SELECT EXISTS (
-                SELECT 1 FROM pointer_history
-                WHERE route_id = $1 AND target_hash = $2
+            WITH updated_route AS (
+                UPDATE routes
+                SET target_hash = $2
+                WHERE id = $1
+                  AND EXISTS (
+                      SELECT 1
+                      FROM pointer_history
+                      WHERE route_id = $1
+                        AND target_hash = $2
+                  )
+                RETURNING id
             )
+            INSERT INTO pointer_history (route_id, target_hash, editor_id)
+            SELECT id, $2, $3
+            FROM updated_route
+            RETURNING id
             ",
         )
         .bind(id.as_str())
         .bind(hash.as_str())
-        .fetch_one(&mut *tx)
-        .await?;
-
-        if !is_version {
-            tx.rollback().await?;
-            return Ok(false);
-        }
-
-        let updated = sqlx::query("UPDATE routes SET target_hash = $2 WHERE id = $1")
-            .bind(id.as_str())
-            .bind(hash.as_str())
-            .execute(&mut *tx)
-            .await?
-            .rows_affected();
-
-        if updated == 0 {
-            tx.rollback().await?;
-            return Ok(false);
-        }
-
-        self.append_history(&mut tx, id, hash, editor_id).await?;
-
-        tx.commit().await?;
-        Ok(true)
-    }
-
-    /// Append one row to the append-only ledger within the caller's transaction.
-    async fn append_history(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-        route_id: &RouteId,
-        target_hash: &ContentHash,
-        editor_id: &str,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query(
-            r"
-            INSERT INTO pointer_history (route_id, target_hash, editor_id)
-            VALUES ($1, $2, $3)
-            ",
-        )
-        .bind(route_id.as_str())
-        .bind(target_hash.as_str())
         .bind(editor_id)
-        .execute(&mut **tx)
+        .fetch_optional(&self.pool)
         .await?;
-        Ok(())
+
+        Ok(history_id.is_some())
     }
 }

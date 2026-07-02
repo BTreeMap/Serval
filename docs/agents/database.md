@@ -52,7 +52,7 @@ delivery time.
 
 | Column | Type | Constraints | Notes |
 |---|---|---|---|
-| `id` | `SERIAL` | PRIMARY KEY | Internal ledger id |
+| `id` | `BIGSERIAL` | PRIMARY KEY | Internal ledger id; keyset pagination tiebreaker |
 | `route_id` | `VARCHAR(64)` | FK → `routes` | The snippet updated |
 | `target_hash` | `VARCHAR(64)` | FK → `content_blocks` | Content hash at this point in time |
 | `editor_id` | `VARCHAR(255)` | NOT NULL | Authenticated user who made the change |

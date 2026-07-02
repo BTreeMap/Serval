@@ -10,7 +10,7 @@ use std::time::Duration;
 use sqlx::PgPool;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
-pub use repo::{CreateRoute, Repository};
+pub use repo::{CreateRoute, Repository, RouteMetadataPatch};
 
 /// Connect to PostgreSQL and apply the idempotent startup schema.
 ///

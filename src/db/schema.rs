@@ -82,17 +82,6 @@ pub async fn apply(pool: &PgPool) -> Result<(), sqlx::Error> {
         .execute(pool)
         .await?;
 
-    // Accelerates the audit-trail lookup for a given route in chronological
-    // order without scanning the whole ledger.
-    sqlx::query(
-        r"
-        CREATE INDEX IF NOT EXISTS pointer_history_route_changed_idx
-            ON pointer_history (route_id, changed_at)
-        ",
-    )
-    .execute(pool)
-    .await?;
-
     // Accelerates the paginated (keyset) history scan for one route: rows are
     // read in `changed_at DESC, id DESC` order, matching the query's ORDER BY
     // exactly, so a page boundary is a single index range scan.
@@ -100,6 +89,24 @@ pub async fn apply(pool: &PgPool) -> Result<(), sqlx::Error> {
         r"
         CREATE INDEX IF NOT EXISTS pointer_history_route_changed_id_idx
             ON pointer_history (route_id, changed_at DESC, id DESC)
+        ",
+    )
+    .execute(pool)
+    .await?;
+
+    // The old `(route_id, changed_at)` index is dominated by the keyset index
+    // above. Dropping it keeps each append-only history write from maintaining
+    // two near-identical timestamp indexes.
+    sqlx::query("DROP INDEX IF EXISTS pointer_history_route_changed_idx")
+        .execute(pool)
+        .await?;
+
+    // Speeds up exact membership checks used by version preview and restore:
+    // "is this content hash part of this route's ledger?".
+    sqlx::query(
+        r"
+        CREATE INDEX IF NOT EXISTS pointer_history_route_target_hash_idx
+            ON pointer_history (route_id, target_hash)
         ",
     )
     .execute(pool)
@@ -126,6 +133,19 @@ pub async fn apply(pool: &PgPool) -> Result<(), sqlx::Error> {
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
+        ",
+    )
+    .execute(pool)
+    .await?;
+
+    // Supports `list_admins`: scan only admin rows, already ordered by most
+    // recent login, with projected columns available from the index.
+    sqlx::query(
+        r"
+        CREATE INDEX IF NOT EXISTS users_admin_last_seen_idx
+            ON users (last_seen_at DESC)
+            INCLUDE (id, created_at)
+            WHERE is_admin = TRUE
         ",
     )
     .execute(pool)

@@ -215,6 +215,14 @@ pub struct HistoryEntry {
     pub changed_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// Route metadata plus one bounded page from the append-only history ledger.
+#[derive(Debug, Clone)]
+pub struct RouteDetailPage {
+    pub meta: RouteMeta,
+    pub history_count: i64,
+    pub history: Vec<HistoryEntry>,
+}
+
 /// A compact route listing entry for the dashboard: enough to render a row and
 /// link through to detail, without loading content or history.
 #[derive(Debug, Clone)]
