@@ -19,18 +19,22 @@ export interface PrefetchTuning {
      *  does not fire a request — only lingering (an intent-to-click signal)
      *  does. */
     hoverIntentMs: number;
-    /** How long a warmed entry stays usable. Generous enough to span
-     *  hover → click → route change → component mount, short enough that a
-     *  stale entry can never outlive a plausible edit-and-revisit. */
+    /** How long a warmed entry stays usable. Deliberately short: this cache
+     *  has no invalidation channel, so its TTL is the sole freshness bound. It
+     *  only needs to bridge hover intent → click → route change → mount (a
+     *  sub-second hop), and must expire well before a concurrent editor's
+     *  change could be masked by a stale warmed response. */
     ttlMs: number;
 }
 
 /** instant.page's researched default: it warms after ~65 ms of hover intent.
- *  The TTL is Serval-specific (instant.page prefetches into the browser cache
- *  and has no equivalent), sized to comfortably outlast a hover→mount hop. */
+ *  The TTL is Serval-specific — instant.page relies on HTTP caching for
+ *  freshness, but this JS cache has no invalidation hook, so we keep it just
+ *  long enough to cover the hover→mount hop and no longer, bounding how stale a
+ *  warmed response can ever be against a concurrent admin edit. */
 export const PREFETCH_DEFAULTS: PrefetchTuning = {
     hoverIntentMs: 65,
-    ttlMs: 30_000,
+    ttlMs: 5_000,
 };
 
 /** Stable cache keys, namespaced so distinct resources never collide. */
