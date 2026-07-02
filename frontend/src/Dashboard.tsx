@@ -25,12 +25,18 @@ import { COMMON_CONTENT_TYPES } from "./content-types";
 /** The landing page: a creation form above the caller's existing snippets. */
 export function Dashboard() {
   const [snippets, setSnippets] = useState<SnippetSummary[]>([]);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Reset to the first page: used on mount and after creating a snippet, so
+  // a newly touched route's updated ordering is always visible immediately.
   const refresh = useCallback(async () => {
     try {
-      setSnippets(await api.listSnippets());
+      const page = await api.listSnippets();
+      setSnippets(page.snippets);
+      setNextCursor(page.next_cursor);
       setError(null);
     } catch (err) {
       setError(messageOf(err));
@@ -38,6 +44,23 @@ export function Dashboard() {
       setLoading(false);
     }
   }, []);
+
+  const loadMore = useCallback(async () => {
+    if (!nextCursor) {
+      return;
+    }
+    setLoadingMore(true);
+    try {
+      const page = await api.listSnippets({ cursor: nextCursor });
+      setSnippets((prev) => [...prev, ...page.snippets]);
+      setNextCursor(page.next_cursor);
+      setError(null);
+    } catch (err) {
+      setError(messageOf(err));
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [nextCursor]);
 
   useEffect(() => {
     // `refresh` only updates state after an awaited request, so the renders
@@ -74,11 +97,25 @@ export function Dashboard() {
             description="Create your first snippet above to get a shareable delivery link."
           />
         ) : (
-          <ul className="space-y-3">
-            {snippets.map((s) => (
-              <SnippetRow key={s.id} snippet={s} />
-            ))}
-          </ul>
+          <>
+            <ul className="space-y-3">
+              {snippets.map((s) => (
+                <SnippetRow key={s.id} snippet={s} />
+              ))}
+            </ul>
+            {nextCursor && (
+              <div className="flex justify-center">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  loading={loadingMore}
+                  onClick={() => void loadMore()}
+                >
+                  {loadingMore ? "Loading…" : "Load more"}
+                </Button>
+              </div>
+            )}
+          </>
         )}
       </section>
     </div>

@@ -225,6 +225,62 @@ impl Harness {
         );
     }
 
+    /// `GET /api/snippets` with optional query params, returning the raw
+    /// JSON envelope (`{ snippets, next_cursor, limit }`).
+    async fn list(&self, query: &[(&str, &str)]) -> Value {
+        let resp = self
+            .client
+            .get(format!("{}/api/snippets", self.control_base))
+            .query(query)
+            .send()
+            .await
+            .expect("list request");
+        assert!(resp.status().is_success(), "list failed: {}", resp.status());
+        resp.json().await.expect("list json")
+    }
+
+    /// `GET /api/snippets` returning only the HTTP status, for asserting
+    /// invalid `limit`/`cursor` values are rejected.
+    async fn list_status(&self, query: &[(&str, &str)]) -> reqwest::StatusCode {
+        self.client
+            .get(format!("{}/api/snippets", self.control_base))
+            .query(query)
+            .send()
+            .await
+            .expect("list request")
+            .status()
+    }
+
+    /// `GET /api/snippets/{id}/history` with optional query params, returning
+    /// the raw JSON envelope (`{ history, next_cursor, limit }`).
+    async fn history_page(&self, id: &str, query: &[(&str, &str)]) -> Value {
+        let resp = self
+            .client
+            .get(format!("{}/api/snippets/{id}/history", self.control_base))
+            .query(query)
+            .send()
+            .await
+            .expect("history page request");
+        assert!(
+            resp.status().is_success(),
+            "history page failed: {}",
+            resp.status()
+        );
+        resp.json().await.expect("history page json")
+    }
+
+    /// `GET /api/snippets/{id}/history` returning only the HTTP status, for
+    /// asserting invalid `limit`/`cursor` values are rejected.
+    async fn history_status(&self, id: &str, query: &[(&str, &str)]) -> reqwest::StatusCode {
+        self.client
+            .get(format!("{}/api/snippets/{id}/history", self.control_base))
+            .query(query)
+            .send()
+            .await
+            .expect("history page request")
+            .status()
+    }
+
     /// `GET {data}/{path}` on the Data Plane, returning the body and headers.
     async fn deliver(&self, path: &str) -> (String, reqwest::header::HeaderMap) {
         let resp = self
@@ -685,5 +741,206 @@ async fn cache_control_mutable_is_no_cache() {
     assert_eq!(
         cc, "no-cache",
         "mutable route must carry no-cache in Cache-Control, got {cc:?}"
+    );
+}
+
+/// `GET /api/snippets` returns pages of at most the requested `limit`, and
+/// walking `next_cursor` to the end visits every created route exactly once,
+/// with no duplicates or gaps — the keyset invariant a cursor must uphold.
+#[tokio::test]
+async fn list_snippets_pages_without_overlap() {
+    let h = Harness::start().await;
+
+    let mut ids = Vec::new();
+    for i in 0..5 {
+        let created = h.create(json!({ "content": format!("snippet {i}") })).await;
+        ids.push(created["id"].as_str().expect("id").to_owned());
+    }
+
+    let mut seen = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let mut query = vec![("limit", "2")];
+        if let Some(c) = cursor.as_deref() {
+            query.push(("cursor", c));
+        }
+        let page = h.list(&query).await;
+        let snippets = page["snippets"].as_array().expect("snippets");
+        assert!(snippets.len() <= 2, "page must respect limit");
+        for s in snippets {
+            seen.push(s["id"].as_str().expect("id").to_owned());
+        }
+        cursor = page["next_cursor"].as_str().map(str::to_owned);
+        if cursor.is_none() {
+            break;
+        }
+    }
+
+    seen.sort();
+    let mut expected = ids.clone();
+    expected.sort();
+    assert_eq!(
+        seen, expected,
+        "cursor traversal must visit every route exactly once"
+    );
+}
+
+/// Invalid `limit` and `cursor` values on `GET /api/snippets` are rejected
+/// with `400`, never silently clamped or ignored.
+#[tokio::test]
+async fn list_snippets_rejects_invalid_limit_and_cursor() {
+    let h = Harness::start().await;
+
+    assert_eq!(
+        h.list_status(&[("limit", "0")]).await,
+        reqwest::StatusCode::BAD_REQUEST,
+        "limit=0 must be rejected"
+    );
+    assert_eq!(
+        h.list_status(&[("limit", "51")]).await,
+        reqwest::StatusCode::BAD_REQUEST,
+        "limit over the cap must be rejected"
+    );
+    assert_eq!(
+        h.list_status(&[("limit", "not-a-number")]).await,
+        reqwest::StatusCode::BAD_REQUEST,
+        "non-numeric limit must be rejected"
+    );
+    assert_eq!(
+        h.list_status(&[("cursor", "not a valid cursor")]).await,
+        reqwest::StatusCode::BAD_REQUEST,
+        "malformed cursor must be rejected"
+    );
+}
+
+/// `GET /api/snippets/{id}` caps its embedded history page at `history_limit`,
+/// but `history_count` always reports the exact ledger total — proving the
+/// two numbers are computed independently rather than one deriving from the
+/// length of the returned page.
+#[tokio::test]
+async fn snippet_detail_caps_history_page_but_reports_exact_count() {
+    let h = Harness::start().await;
+
+    let created = h.create(json!({ "content": "v0" })).await;
+    let id = created["id"].as_str().expect("id").to_owned();
+    for i in 1..=12 {
+        h.update(&id, &format!("v{i}")).await;
+    }
+
+    let resp = h
+        .client
+        .get(format!("{}/api/snippets/{id}?limit=5", h.control_base))
+        .send()
+        .await
+        .expect("detail request");
+    assert!(resp.status().is_success());
+    let detail: Value = resp.json().await.expect("detail json");
+
+    assert_eq!(detail["history_count"].as_u64(), Some(13));
+    let history = detail["history"].as_array().expect("history");
+    assert_eq!(history.len(), 5, "embedded history page must respect limit");
+    assert!(
+        detail["history_next_cursor"].as_str().is_some(),
+        "more history remains, so a next_cursor must be present"
+    );
+    assert_eq!(history[0]["is_current"], json!(true));
+    assert_eq!(history[0]["version_number"], json!(13));
+}
+
+/// Paginating `GET /api/snippets/{id}/history` to the end visits every one of
+/// 101 ledger entries exactly once, and each entry's `version_number` stays
+/// stable and monotonically decreasing across page boundaries — the whole
+/// point of carrying `snapshot_total`/`loaded_count` inside the cursor.
+#[tokio::test]
+async fn history_pagination_covers_full_ledger_with_stable_version_numbers() {
+    let h = Harness::start().await;
+
+    let created = h.create(json!({ "content": "v0" })).await;
+    let id = created["id"].as_str().expect("id").to_owned();
+    for i in 1..=100 {
+        h.update(&id, &format!("v{i}")).await;
+    }
+
+    // First page comes from the detail endpoint.
+    let detail = h.detail(&id).await;
+    assert_eq!(detail["history_count"].as_u64(), Some(101));
+    let mut version_numbers = Vec::new();
+    for item in detail["history"].as_array().expect("history") {
+        version_numbers.push(item["version_number"].as_i64().expect("version_number"));
+    }
+    assert_eq!(version_numbers[0], 101, "newest entry is version 101");
+    assert_eq!(detail["history"][0]["is_current"], json!(true));
+
+    // Walk the rest via the dedicated history endpoint.
+    let mut cursor = detail["history_next_cursor"]
+        .as_str()
+        .map(str::to_owned)
+        .expect("more history to page through");
+    loop {
+        let page = h.history_page(&id, &[("cursor", &cursor)]).await;
+        for item in page["history"].as_array().expect("history") {
+            assert_eq!(
+                item["is_current"],
+                json!(false),
+                "only the newest entry may be current"
+            );
+            version_numbers.push(item["version_number"].as_i64().expect("version_number"));
+        }
+        match page["next_cursor"].as_str() {
+            Some(next) => cursor = next.to_owned(),
+            None => break,
+        }
+    }
+
+    assert_eq!(
+        version_numbers.len(),
+        101,
+        "every ledger row must be visited exactly once"
+    );
+    let expected: Vec<i64> = (1..=101).rev().collect();
+    assert_eq!(
+        version_numbers, expected,
+        "version numbers must be stable and strictly decreasing across pages"
+    );
+}
+
+/// Invalid `limit` and `cursor` values on `GET /api/snippets/{id}/history` are
+/// rejected with `400`, and a cursor minted for the snippet-list endpoint is
+/// rejected as a type mismatch rather than silently misinterpreted.
+#[tokio::test]
+async fn history_page_rejects_invalid_limit_and_cursor() {
+    let h = Harness::start().await;
+
+    let created = h.create(json!({ "content": "v0" })).await;
+    let id = created["id"].as_str().expect("id").to_owned();
+    // A second route ensures the list endpoint actually has a next page to
+    // mint a cursor from, so the cross-endpoint rejection below is exercised.
+    h.create(json!({ "content": "other snippet" })).await;
+
+    assert_eq!(
+        h.history_status(&id, &[("limit", "0")]).await,
+        reqwest::StatusCode::BAD_REQUEST,
+        "limit=0 must be rejected"
+    );
+    assert_eq!(
+        h.history_status(&id, &[("limit", "51")]).await,
+        reqwest::StatusCode::BAD_REQUEST,
+        "limit over the cap must be rejected"
+    );
+    assert_eq!(
+        h.history_status(&id, &[("cursor", "garbage")]).await,
+        reqwest::StatusCode::BAD_REQUEST,
+        "malformed cursor must be rejected"
+    );
+
+    // A cursor minted for the snippet list must not type-check here.
+    let list_page = h.list(&[("limit", "1")]).await;
+    let list_cursor = list_page["next_cursor"]
+        .as_str()
+        .expect("two routes exist, so the list page must have a next_cursor");
+    assert_eq!(
+        h.history_status(&id, &[("cursor", list_cursor)]).await,
+        reqwest::StatusCode::BAD_REQUEST,
+        "a snippets-list cursor must not be accepted by the history endpoint"
     );
 }

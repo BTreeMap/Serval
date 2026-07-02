@@ -67,6 +67,16 @@ const KEY_DERIVATION_CONTEXT: &str = "serval route-id mac v1";
 /// an ETag value even if the etag key is somehow exposed.
 const ETAG_KEY_DERIVATION_CONTEXT: &str = "serval delivery etag v1";
 
+/// Domain-separation context for deriving the pagination-cursor key. Kept
+/// distinct from the route-id MAC and ETag keys so an opaque cursor can never
+/// be mistaken for (or forged from) either of those values.
+const CURSOR_KEY_DERIVATION_CONTEXT: &str = "serval pagination cursor mac v1";
+
+/// Bytes of the truncated keyed MAC appended to every pagination cursor.
+/// A cursor is integrity-protected state, not a capability, so 128 bits of
+/// tamper resistance is ample — matching the route-id MAC's truncation.
+pub const CURSOR_MAC_LEN: usize = 16;
+
 const ETAG_ENCODED_LEN: usize = match base64::encoded_len(blake3::OUT_LEN, false) {
     Some(len) => len,
     None => panic!("BLAKE3 digest encoded length must fit in usize"),
@@ -85,6 +95,9 @@ pub struct IdSigner {
     /// Separate key for ETag derivation so the permanent content-serving hash
     /// is never exposed through the ETag value.
     etag_key: [u8; blake3::KEY_LEN],
+    /// Separate key for pagination-cursor integrity, so a cursor's MAC can
+    /// never be confused with (or forged via) the route-id or ETag keys.
+    cursor_key: [u8; blake3::KEY_LEN],
 }
 
 impl IdSigner {
@@ -98,7 +111,12 @@ impl IdSigner {
     pub fn new(secret: &str) -> Self {
         let key = blake3::derive_key(KEY_DERIVATION_CONTEXT, secret.as_bytes());
         let etag_key = blake3::derive_key(ETAG_KEY_DERIVATION_CONTEXT, secret.as_bytes());
-        Self { key, etag_key }
+        let cursor_key = blake3::derive_key(CURSOR_KEY_DERIVATION_CONTEXT, secret.as_bytes());
+        Self {
+            key,
+            etag_key,
+            cursor_key,
+        }
     }
 
     /// Keyed MAC over a 32-byte prefix, truncated to [`MAC_LEN`] bytes.
@@ -201,6 +219,29 @@ impl IdSigner {
         }
         let (prefix, mac) = buf.split_at(PREFIX_LEN);
         let expected = self.mac(prefix);
+        expected.ct_eq(mac).into()
+    }
+
+    /// Keyed MAC over an opaque pagination-cursor payload, truncated to
+    /// [`CURSOR_MAC_LEN`] bytes. The payload is arbitrary serialized cursor
+    /// state (a keyset position, not a capability), so this only needs to
+    /// resist tampering, not double as a routable id.
+    #[must_use]
+    pub fn sign_cursor(&self, payload: &[u8]) -> [u8; CURSOR_MAC_LEN] {
+        let tag = blake3::keyed_hash(&self.cursor_key, payload);
+        let mut mac = [0u8; CURSOR_MAC_LEN];
+        mac.copy_from_slice(&tag.as_bytes()[..CURSOR_MAC_LEN]);
+        mac
+    }
+
+    /// Verify a pagination cursor's MAC in constant time. Returns `false` for
+    /// any wrong-length or forged tag.
+    #[must_use]
+    pub fn verify_cursor(&self, payload: &[u8], mac: &[u8]) -> bool {
+        if mac.len() != CURSOR_MAC_LEN {
+            return false;
+        }
+        let expected = self.sign_cursor(payload);
         expected.ct_eq(mac).into()
     }
 }
@@ -376,5 +417,57 @@ mod tests {
         let hash = s.content_id("payload");
         let tag_inner = s.etag(&hash, b"").trim_matches('"').to_owned();
         assert_ne!(tag_inner, hash, "ETag inner must not equal the content id");
+    }
+
+    #[test]
+    fn cursor_mac_is_deterministic() {
+        let s = signer();
+        assert_eq!(s.sign_cursor(b"payload"), s.sign_cursor(b"payload"));
+    }
+
+    #[test]
+    fn cursor_mac_differs_by_payload() {
+        let s = signer();
+        assert_ne!(s.sign_cursor(b"page-a"), s.sign_cursor(b"page-b"));
+    }
+
+    #[test]
+    fn cursor_mac_verifies_matching_payload() {
+        let s = signer();
+        let mac = s.sign_cursor(b"payload");
+        assert!(s.verify_cursor(b"payload", &mac));
+    }
+
+    #[test]
+    fn cursor_mac_rejects_tampered_payload() {
+        let s = signer();
+        let mac = s.sign_cursor(b"payload");
+        assert!(!s.verify_cursor(b"other payload", &mac));
+    }
+
+    #[test]
+    fn cursor_mac_rejects_wrong_length() {
+        let s = signer();
+        assert!(!s.verify_cursor(b"payload", b"short"));
+    }
+
+    #[test]
+    fn cursor_mac_rejects_another_secret() {
+        let mint = IdSigner::new("attacker-does-not-know-this");
+        let guard = signer();
+        let mac = mint.sign_cursor(b"payload");
+        assert!(!guard.verify_cursor(b"payload", &mac));
+    }
+
+    #[test]
+    fn cursor_key_is_distinct_from_id_and_etag_keys() {
+        // The three domain-separated keys must not collide: a cursor MAC
+        // must not equal what the route-id MAC or ETag would produce for the
+        // same bytes.
+        let s = signer();
+        let payload = b"same-bytes";
+        let cursor_mac = s.sign_cursor(payload);
+        let id_mac = s.mac(payload);
+        assert_ne!(cursor_mac, id_mac);
     }
 }

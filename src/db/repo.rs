@@ -366,42 +366,91 @@ impl Repository {
         ))
     }
 
-    /// List a user's routes, most recently changed first. The "last changed"
-    /// timestamp is read from the head of each route's history ledger, so the
-    /// listing reflects updates without the `routes` table carrying a mutable
-    /// timestamp column.
-    pub async fn list_routes_for_owner(
+    /// List a page of a user's routes, most recently changed first. The
+    /// "last changed" timestamp is read from the head of each route's history
+    /// ledger via a per-route `LATERAL` lookup, so the listing reflects
+    /// updates without the `routes` table carrying a mutable timestamp column.
+    ///
+    /// `after` is the `(updated_at, id)` keyset tuple of the last row the
+    /// caller already has — `None` fetches the first page. `fetch_limit`
+    /// should be the caller's page size *plus one*, so the caller can detect
+    /// whether another page follows without a second query. Both branches
+    /// share the same `ORDER BY`, so the two queries are guaranteed to agree
+    /// on row order at the page boundary.
+    pub async fn list_routes_for_owner_page(
         &self,
         owner_id: &str,
+        after: Option<(chrono::DateTime<chrono::Utc>, &str)>,
+        fetch_limit: i64,
     ) -> Result<Vec<RouteSummary>, sqlx::Error> {
-        let rows = sqlx::query_as::<
-            _,
-            (
-                String,
-                String,
-                Option<String>,
-                Option<String>,
-                Option<String>,
-                chrono::DateTime<chrono::Utc>,
-            ),
-        >(
-            r"
-            SELECT r.id,
-                   r.content_type,
-                   r.title,
-                   r.description,
-                   r.owner_id,
-                   COALESCE(MAX(h.changed_at), NOW()) AS updated_at
-            FROM routes r
-            LEFT JOIN pointer_history h ON h.route_id = r.id
-            WHERE r.owner_id = $1
-            GROUP BY r.id, r.content_type, r.title, r.description, r.owner_id
-            ORDER BY updated_at DESC
-            ",
-        )
-        .bind(owner_id)
-        .fetch_all(&self.pool)
-        .await?;
+        type Row = (
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            chrono::DateTime<chrono::Utc>,
+        );
+
+        let rows = if let Some((after_updated_at, after_id)) = after {
+            sqlx::query_as::<_, Row>(
+                r"
+                SELECT id, content_type, title, description, owner_id, updated_at
+                FROM (
+                    SELECT r.id,
+                           r.content_type,
+                           r.title,
+                           r.description,
+                           r.owner_id,
+                           COALESCE(latest.changed_at, NOW()) AS updated_at
+                    FROM routes r
+                    LEFT JOIN LATERAL (
+                        SELECT h.changed_at
+                        FROM pointer_history h
+                        WHERE h.route_id = r.id
+                        ORDER BY h.changed_at DESC, h.id DESC
+                        LIMIT 1
+                    ) latest ON TRUE
+                    WHERE r.owner_id = $1
+                ) page
+                WHERE (updated_at, id) < ($2, $3)
+                ORDER BY updated_at DESC, id DESC
+                LIMIT $4
+                ",
+            )
+            .bind(owner_id)
+            .bind(after_updated_at)
+            .bind(after_id)
+            .bind(fetch_limit)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as::<_, Row>(
+                r"
+                SELECT r.id,
+                       r.content_type,
+                       r.title,
+                       r.description,
+                       r.owner_id,
+                       COALESCE(latest.changed_at, NOW()) AS updated_at
+                FROM routes r
+                LEFT JOIN LATERAL (
+                    SELECT h.changed_at
+                    FROM pointer_history h
+                    WHERE h.route_id = r.id
+                    ORDER BY h.changed_at DESC, h.id DESC
+                    LIMIT 1
+                ) latest ON TRUE
+                WHERE r.owner_id = $1
+                ORDER BY updated_at DESC, id DESC
+                LIMIT $2
+                ",
+            )
+            .bind(owner_id)
+            .bind(fetch_limit)
+            .fetch_all(&self.pool)
+            .await?
+        };
 
         Ok(rows
             .into_iter()
@@ -420,23 +469,60 @@ impl Repository {
             .collect())
     }
 
-    /// List the full version history of a route, newest first.
-    pub async fn list_history(&self, id: &RouteId) -> Result<Vec<HistoryEntry>, sqlx::Error> {
-        let rows = sqlx::query_as::<_, (String, String, chrono::DateTime<chrono::Utc>)>(
-            r"
-            SELECT target_hash, editor_id, changed_at
-            FROM pointer_history
-            WHERE route_id = $1
-            ORDER BY changed_at DESC, id DESC
-            ",
-        )
-        .bind(id.as_str())
-        .fetch_all(&self.pool)
-        .await?;
+    /// List a page of a route's version history, newest first.
+    ///
+    /// `after` is the `(changed_at, id)` keyset tuple of the last row the
+    /// caller already has — `None` fetches the first (newest) page.
+    /// `fetch_limit` should be the caller's page size *plus one*, matching the
+    /// same "fetch one extra to detect more" convention as
+    /// [`list_routes_for_owner_page`]. The append-only ledger is never
+    /// truncated by this method — see [`Self::history_count`] for the exact
+    /// total.
+    pub async fn list_history_page(
+        &self,
+        id: &RouteId,
+        after: Option<(chrono::DateTime<chrono::Utc>, i64)>,
+        fetch_limit: i64,
+    ) -> Result<Vec<HistoryEntry>, sqlx::Error> {
+        type Row = (i64, String, String, chrono::DateTime<chrono::Utc>);
+
+        let rows = if let Some((after_changed_at, after_id)) = after {
+            sqlx::query_as::<_, Row>(
+                r"
+                SELECT id, target_hash, editor_id, changed_at
+                FROM pointer_history
+                WHERE route_id = $1
+                  AND (changed_at, id) < ($2, $3)
+                ORDER BY changed_at DESC, id DESC
+                LIMIT $4
+                ",
+            )
+            .bind(id.as_str())
+            .bind(after_changed_at)
+            .bind(after_id)
+            .bind(fetch_limit)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as::<_, Row>(
+                r"
+                SELECT id, target_hash, editor_id, changed_at
+                FROM pointer_history
+                WHERE route_id = $1
+                ORDER BY changed_at DESC, id DESC
+                LIMIT $2
+                ",
+            )
+            .bind(id.as_str())
+            .bind(fetch_limit)
+            .fetch_all(&self.pool)
+            .await?
+        };
 
         Ok(rows
             .into_iter()
-            .map(|(target_hash, editor_id, changed_at)| HistoryEntry {
+            .map(|(id, target_hash, editor_id, changed_at)| HistoryEntry {
+                id,
                 target_hash,
                 editor_id,
                 changed_at,

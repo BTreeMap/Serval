@@ -11,11 +11,21 @@ export interface SnippetResponse {
     owner_id: string | null;
 }
 
-/** One immutable entry in a route's append-only version ledger. */
+/** Hard cap on rows requested or rendered per page, matching the backend's
+ *  `MAX_PAGE_LIMIT`. Neither the client nor the UI should ever ask for more. */
+export const MAX_PAGE_LIMIT = 50;
+
+/** One immutable entry in a route's append-only version ledger.
+ *
+ *  `version_number` and `is_current` are computed server-side from the exact
+ *  ledger total captured when pagination began, so a badge like `v12` stays
+ *  correct regardless of which page happens to be loaded in the browser. */
 export interface HistoryItem {
     target_hash: string;
     editor_id: string;
     changed_at: string;
+    version_number: number;
+    is_current: boolean;
 }
 
 /** The content of one historical version, fetched for previewing. */
@@ -24,7 +34,10 @@ export interface VersionContent {
     content: string;
 }
 
-/** A route plus its full version history. */
+/** A route plus the newest page of its version history. `history_count` is
+ *  always the exact, unpaginated ledger size; `history` holds only the
+ *  newest `history_limit` entries. Fetch older entries via
+ *  `api.listSnippetHistory`. */
 export interface SnippetDetail {
     id: string;
     content_type: string;
@@ -33,6 +46,29 @@ export interface SnippetDetail {
     owner_id: string | null;
     history_count: number;
     history: HistoryItem[];
+    history_next_cursor: string | null;
+    history_limit: number;
+}
+
+/** One page of the owner's snippet listing. `next_cursor` is `null` once the
+ *  caller has reached the end of the list. */
+export interface SnippetListResponse {
+    snippets: SnippetSummary[];
+    next_cursor: string | null;
+    limit: number;
+}
+
+/** One page of a route's version history, for "Load older versions". */
+export interface HistoryPageResponse {
+    history: HistoryItem[];
+    next_cursor: string | null;
+    limit: number;
+}
+
+/** Shared `?limit=&cursor=` pagination request params. */
+export interface PageParams {
+    limit?: number;
+    cursor?: string | null;
 }
 
 /** A compact route listing entry for the dashboard index. */
@@ -185,6 +221,20 @@ function normalizeNewlines(text: string): string {
     return text.replace(/\r\n|\r/g, "\n");
 }
 
+/** Build a `?limit=&cursor=` query string from pagination params, omitting
+ *  absent fields entirely rather than sending empty values. */
+function pageQuery(params: PageParams): string {
+    const search = new URLSearchParams();
+    if (params.limit !== undefined) {
+        search.set("limit", String(params.limit));
+    }
+    if (params.cursor) {
+        search.set("cursor", params.cursor);
+    }
+    const query = search.toString();
+    return query ? `?${query}` : "";
+}
+
 export const api = {
     authInfo(): Promise<AuthInfo> {
         return request<AuthInfo>("/api/auth-info");
@@ -229,8 +279,8 @@ export const api = {
         return request<Me>("/api/me");
     },
 
-    listSnippets(): Promise<SnippetSummary[]> {
-        return request<SnippetSummary[]>("/api/snippets");
+    listSnippets(params: PageParams = {}): Promise<SnippetListResponse> {
+        return request<SnippetListResponse>(`/api/snippets${pageQuery(params)}`);
     },
 
     createSnippet(payload: CreateRequest): Promise<SnippetResponse> {
@@ -244,8 +294,16 @@ export const api = {
         });
     },
 
-    getSnippet(id: string): Promise<SnippetDetail> {
-        return request<SnippetDetail>(`/api/snippets/${encodeURIComponent(id)}`);
+    getSnippet(id: string, params: PageParams = {}): Promise<SnippetDetail> {
+        return request<SnippetDetail>(
+            `/api/snippets/${encodeURIComponent(id)}${pageQuery(params)}`,
+        );
+    },
+
+    listSnippetHistory(id: string, params: PageParams = {}): Promise<HistoryPageResponse> {
+        return request<HistoryPageResponse>(
+            `/api/snippets/${encodeURIComponent(id)}/history${pageQuery(params)}`,
+        );
     },
 
     updateSnippet(id: string, update: UpdateRequest): Promise<SnippetResponse> {

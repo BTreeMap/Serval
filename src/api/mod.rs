@@ -3,6 +3,7 @@
 mod error;
 mod extract;
 mod handlers;
+mod pagination;
 mod static_files;
 
 use axum::Router;
@@ -35,6 +36,10 @@ pub fn router(state: ControlState) -> Router {
         .route(
             "/api/snippets/{id}/versions/{hash}",
             get(handlers::get_version),
+        )
+        .route(
+            "/api/snippets/{id}/history",
+            get(handlers::get_snippet_history),
         )
         .route(
             "/api/snippets/{id}/restore",

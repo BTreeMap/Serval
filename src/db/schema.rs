@@ -82,6 +82,29 @@ pub async fn apply(pool: &PgPool) -> Result<(), sqlx::Error> {
     .execute(pool)
     .await?;
 
+    // Accelerates the paginated (keyset) history scan for one route: rows are
+    // read in `changed_at DESC, id DESC` order, matching the query's ORDER BY
+    // exactly, so a page boundary is a single index range scan.
+    sqlx::query(
+        r"
+        CREATE INDEX IF NOT EXISTS pointer_history_route_changed_id_idx
+            ON pointer_history (route_id, changed_at DESC, id DESC)
+        ",
+    )
+    .execute(pool)
+    .await?;
+
+    // Narrows the owner's snippet listing to their own routes before the sort;
+    // the listing itself still orders by each route's latest ledger entry.
+    sqlx::query(
+        r"
+        CREATE INDEX IF NOT EXISTS routes_owner_id_idx
+            ON routes (owner_id, id)
+        ",
+    )
+    .execute(pool)
+    .await?;
+
     // Locally tracked authenticated users. Upserted on login; `is_admin` is
     // administered locally and is independent of any OAuth provider claim.
     sqlx::query(

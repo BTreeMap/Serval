@@ -206,6 +206,10 @@ pub struct RouteMeta {
 /// One entry in the append-only `pointer_history` ledger.
 #[derive(Debug, Clone)]
 pub struct HistoryEntry {
+    /// The ledger row's own primary key. Never shown to the client directly,
+    /// but it is the tiebreaker in `changed_at DESC, id DESC` ordering and the
+    /// keyset value a pagination cursor resumes from.
+    pub id: i64,
     pub target_hash: String,
     pub editor_id: String,
     pub changed_at: chrono::DateTime<chrono::Utc>,

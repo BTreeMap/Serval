@@ -15,12 +15,23 @@ import { COMMON_CONTENT_TYPES } from "./content-types";
 export function SnippetDetail() {
   const { id = "" } = useParams<{ id: string }>();
   const [detail, setDetail] = useState<Detail | null>(null);
+  // The history ledger is paginated independently of the rest of the detail
+  // view: `refresh` (re-fetching metadata after an edit) always resets these
+  // back to the server's newest page, while `loadMoreHistory` only appends.
+  const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [historyNextCursor, setHistoryNextCursor] = useState<string | null>(null);
+  const [loadingMoreHistory, setLoadingMoreHistory] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
-      setDetail(await api.getSnippet(id));
+      const next = await api.getSnippet(id);
+      setDetail(next);
+      setHistory(next.history);
+      setHistoryNextCursor(next.history_next_cursor);
+      setHistoryError(null);
       setError(null);
     } catch (err) {
       setError(messageOf(err));
@@ -28,6 +39,23 @@ export function SnippetDetail() {
       setLoading(false);
     }
   }, [id]);
+
+  const loadMoreHistory = useCallback(async () => {
+    if (!historyNextCursor) {
+      return;
+    }
+    setLoadingMoreHistory(true);
+    try {
+      const page = await api.listSnippetHistory(id, { cursor: historyNextCursor });
+      setHistory((prev) => [...prev, ...page.history]);
+      setHistoryNextCursor(page.next_cursor);
+      setHistoryError(null);
+    } catch (err) {
+      setHistoryError(messageOf(err));
+    } finally {
+      setLoadingMoreHistory(false);
+    }
+  }, [id, historyNextCursor]);
 
   useEffect(() => {
     // `refresh` only updates state after an awaited request, so the renders
@@ -107,7 +135,12 @@ export function SnippetDetail() {
 
       <HistoryList
         id={detail.id}
-        history={detail.history}
+        history={history}
+        historyCount={detail.history_count}
+        nextCursor={historyNextCursor}
+        loadingMore={loadingMoreHistory}
+        loadMoreError={historyError}
+        onLoadMore={() => void loadMoreHistory()}
         onRestored={() => void refresh()}
       />
     </div>
@@ -244,25 +277,27 @@ function ContentTypeEditor({
   );
 }
 
-/** A version's lifecycle stance within the append-only ledger. The newest
- *  entry is `current`; everything before it is `historic` and restorable. */
-type VersionState = "current" | "historic";
-
-/** Total function from ledger position to lifecycle state — index 0 is the
- *  live pointer, the single source of truth for the badge and restore affordance. */
-function determineVersionState(index: number): VersionState {
-  return index === 0 ? "current" : "historic";
-}
-
-/** The version ledger, newest first. Each entry can be previewed and restored;
- *  restoring repoints the snippet and appends a new version. */
+/** The version ledger, newest first. Only the newest page is loaded up front;
+ *  older entries are fetched a page at a time via `onLoadMore`. Each entry can
+ *  be previewed and restored; restoring repoints the snippet and appends a new
+ *  version, which resets pagination back to the newest page. */
 function HistoryList({
   id,
   history,
+  historyCount,
+  nextCursor,
+  loadingMore,
+  loadMoreError,
+  onLoadMore,
   onRestored,
 }: {
   id: string;
   history: HistoryItem[];
+  historyCount: number;
+  nextCursor: string | null;
+  loadingMore: boolean;
+  loadMoreError: string | null;
+  onLoadMore: () => void;
   onRestored: () => void;
 }) {
   const [openHash, setOpenHash] = useState<string | null>(null);
@@ -329,15 +364,16 @@ function HistoryList({
       <h2 className="flex items-center gap-2 text-lg font-semibold">
         <Icons.History className="h-5 w-5 text-ink-faint" aria-hidden />
         Version history
+        <span className="text-sm font-normal text-ink-faint">
+          ({history.length} of {historyCount} loaded)
+        </span>
       </h2>
       {error && <Banner tone="error">{error}</Banner>}
       <ol className="space-y-2">
-        {history.map((entry, index) => (
+        {history.map((entry) => (
           <VersionHistoryRow
-            key={`${entry.changed_at}-${entry.target_hash}`}
+            key={entry.version_number}
             entry={entry}
-            state={determineVersionState(index)}
-            label={index === 0 ? "current" : `v${history.length - index}`}
             isOpen={openHash === entry.target_hash}
             busy={busyHash === entry.target_hash}
             loadVersion={loadVersion}
@@ -346,6 +382,14 @@ function HistoryList({
           />
         ))}
       </ol>
+      {loadMoreError && <Banner tone="error">{loadMoreError}</Banner>}
+      {nextCursor && (
+        <div className="flex justify-center">
+          <Button variant="secondary" size="sm" loading={loadingMore} onClick={onLoadMore}>
+            {loadingMore ? "Loading…" : "Load older versions"}
+          </Button>
+        </div>
+      )}
     </section>
   );
 }
@@ -359,8 +403,6 @@ function HistoryList({
  *  a fixed mutual order across every breakpoint. */
 const VersionHistoryRow = memo(function VersionHistoryRow({
   entry,
-  state,
-  label,
   isOpen,
   busy,
   loadVersion,
@@ -368,8 +410,6 @@ const VersionHistoryRow = memo(function VersionHistoryRow({
   onRestore,
 }: {
   entry: HistoryItem;
-  state: VersionState;
-  label: string;
   isOpen: boolean;
   busy: boolean;
   loadVersion: (hash: string) => Promise<string>;
@@ -409,8 +449,10 @@ const VersionHistoryRow = memo(function VersionHistoryRow({
             </span>
           </div>
           <div className="flex items-center gap-2">
-            <Badge tone={state === "current" ? "wisteria" : "neutral"}>{label}</Badge>
-            {state === "historic" && (
+            <Badge tone={entry.is_current ? "wisteria" : "neutral"}>
+              {entry.is_current ? "current" : `v${entry.version_number}`}
+            </Badge>
+            {!entry.is_current && (
               <Button
                 variant="secondary"
                 size="sm"

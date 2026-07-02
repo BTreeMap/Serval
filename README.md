@@ -137,9 +137,22 @@ curl "http://localhost:3000/<id>?name=world&port=8080"
 curl -s -X PATCH http://localhost:8080/api/snippets/<id> \
   -H 'content-type: application/json' -d '{"content":"Goodbye"}'
 
-# Inspect a snippet and its version ledger
+# List your snippets, newest-changed first (capped at 50/page; pass the
+# previous page's next_cursor to continue — there is no OFFSET/page number)
+curl -s http://localhost:8080/api/snippets
+# => {"snippets":[{"id":"<id>", ...}, ...],"next_cursor":"<opaque-token-or-null>","limit":50}
+curl -s "http://localhost:8080/api/snippets?limit=10&cursor=<next_cursor>"
+
+# Inspect a snippet: metadata plus the newest page of its version ledger.
+# `history_count` is always the exact total, independent of the page size.
 curl -s http://localhost:8080/api/snippets/<id>
-# => {"id":"<id>","history":[{"target_hash":"<hash>", ...}, ...], ...}
+# => {"id":"<id>","history_count":101,"history":[{"target_hash":"<hash>",
+#     "version_number":101,"is_current":true, ...}, ...],
+#     "history_next_cursor":"<opaque-token-or-null>","history_limit":50}
+
+# Page through older versions
+curl -s "http://localhost:8080/api/snippets/<id>/history?cursor=<history_next_cursor>"
+# => {"history":[...],"next_cursor":"<opaque-token-or-null>","limit":50}
 
 # Restore an earlier version (repoints the snippet, appends a new version)
 curl -s -X POST http://localhost:8080/api/snippets/<id>/restore \

@@ -7,14 +7,16 @@
 //! fresh.
 
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderValue, StatusCode};
 use serde::{Deserialize, Serialize};
 
 use super::error::ApiError;
 use super::extract::Caller;
+use super::pagination::{HistoryCursor, PageLimit, SnippetsCursor, take_page};
+use crate::crypto::IdSigner;
 use crate::db::CreateRoute;
-use crate::db::models::{ContentHash, RouteAnnotations, RouteId};
+use crate::db::models::{ContentHash, HistoryEntry, RouteAnnotations, RouteId};
 use crate::state::ControlState;
 
 const DEFAULT_CONTENT_TYPE: &str = "text/plain; charset=utf-8";
@@ -65,6 +67,33 @@ pub struct RestoreRequest {
     pub target_hash: String,
 }
 
+/// Query parameters accepted by every paginated collection endpoint: an
+/// optional page size (defaults to and is capped at
+/// [`super::pagination::MAX_PAGE_LIMIT`]) and an opaque resume cursor from a
+/// previous page's `next_cursor`.
+#[derive(Debug, Deserialize)]
+pub struct PageQuery {
+    #[serde(default)]
+    pub limit: Option<String>,
+    #[serde(default)]
+    pub cursor: Option<String>,
+}
+
+impl PageQuery {
+    /// Parse the `limit` field as a positive integer, rejecting anything else
+    /// with a `BadRequest` before it ever reaches [`PageLimit::parse`].
+    fn parsed_limit(&self) -> Result<Option<u32>, ApiError> {
+        self.limit
+            .as_deref()
+            .map(|raw| {
+                raw.parse::<u32>().map_err(|_| {
+                    ApiError::BadRequest("limit must be a positive integer".to_owned())
+                })
+            })
+            .transpose()
+    }
+}
+
 /// Representation of a route returned to the dashboard.
 #[derive(Debug, Serialize)]
 pub struct SnippetResponse {
@@ -82,23 +111,52 @@ pub struct SnippetSummary {
     pub owner_id: Option<String>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
+
+/// One page of the owner's snippet listing, ordered newest-changed first.
+/// `next_cursor` is `None` once the caller has reached the end of the list.
+#[derive(Debug, Serialize)]
+pub struct SnippetListResponse {
+    pub snippets: Vec<SnippetSummary>,
+    pub next_cursor: Option<String>,
+    pub limit: u32,
+}
+
 /// One history ledger entry, serialized for the UI.
+///
+/// `version_number` and `is_current` are computed server-side from the exact
+/// ledger total captured when pagination began, so a badge like `v12` stays
+/// correct regardless of which page happens to be loaded in the browser.
 #[derive(Debug, Serialize)]
 pub struct HistoryItem {
     pub target_hash: String,
     pub editor_id: String,
     pub changed_at: chrono::DateTime<chrono::Utc>,
+    pub version_number: i64,
+    pub is_current: bool,
 }
 
-/// Detailed view of a route, including its version ledger.
+/// One page of a route's version history, for `Load older versions`.
+#[derive(Debug, Serialize)]
+pub struct HistoryPageResponse {
+    pub history: Vec<HistoryItem>,
+    pub next_cursor: Option<String>,
+    pub limit: u32,
+}
+
+/// Detailed view of a route, including the first page of its version ledger.
+/// `history_count` is always the exact, unpaginated ledger size; `history`
+/// holds only the newest page (up to `history_limit` entries). Older entries
+/// are fetched via `GET /api/snippets/{id}/history`.
 #[derive(Debug, Serialize)]
 pub struct SnippetDetail {
     pub id: String,
     #[serde(flatten)]
     pub annotations: RouteAnnotations,
     pub owner_id: Option<String>,
-    pub history_count: usize,
+    pub history_count: i64,
     pub history: Vec<HistoryItem>,
+    pub history_next_cursor: Option<String>,
+    pub history_limit: u32,
 }
 
 /// The content of one historical version, returned for previewing.
@@ -165,13 +223,41 @@ pub async fn me(caller: Caller) -> Json<MeResponse> {
     })
 }
 
-/// `GET /api/snippets` — list the caller's routes, newest first.
+/// `GET /api/snippets` — list the caller's routes, newest-changed first.
+/// Returns at most `limit` rows (default and hard cap
+/// [`super::pagination::MAX_PAGE_LIMIT`]); pass the previous page's
+/// `next_cursor` as `?cursor=` to resume the scan.
 pub async fn list_snippets(
     State(state): State<ControlState>,
     caller: Caller,
-) -> Result<Json<Vec<SnippetSummary>>, ApiError> {
-    let routes = state.repo.list_routes_for_owner(&caller.user_id).await?;
-    let snippets = routes
+    Query(query): Query<PageQuery>,
+) -> Result<Json<SnippetListResponse>, ApiError> {
+    let limit = PageLimit::parse(query.parsed_limit()?)?;
+    let cursor = SnippetsCursor::parse(query.cursor.as_deref(), &state.signer)?;
+    let after = cursor.map(|c| (c.updated_at, c.id));
+
+    let rows = state
+        .repo
+        .list_routes_for_owner_page(
+            &caller.user_id,
+            after
+                .as_ref()
+                .map(|(updated_at, id)| (*updated_at, id.as_str())),
+            limit.as_i64() + 1,
+        )
+        .await?;
+    let (page, has_more) = take_page(rows, limit);
+
+    let next_cursor = has_more.then(|| {
+        let last = page.last().expect("has_more implies a non-empty page");
+        SnippetsCursor {
+            updated_at: last.updated_at,
+            id: last.id.clone(),
+        }
+        .encode(&state.signer)
+    });
+
+    let snippets = page
         .into_iter()
         .map(|r| SnippetSummary {
             id: r.id,
@@ -180,7 +266,12 @@ pub async fn list_snippets(
             updated_at: r.updated_at,
         })
         .collect();
-    Ok(Json(snippets))
+
+    Ok(Json(SnippetListResponse {
+        snippets,
+        next_cursor,
+        limit: limit.as_u32(),
+    }))
 }
 
 /// `POST /api/snippets` — create a new editable snippet.
@@ -339,13 +430,19 @@ pub async fn update_snippet(
     }))
 }
 
-/// `GET /api/snippets/{id}` — return route metadata and its version ledger.
+/// `GET /api/snippets/{id}` — return route metadata and the newest page of
+/// its version ledger (up to `?limit=`, default and cap
+/// [`super::pagination::MAX_PAGE_LIMIT`]). `history_count` is always the exact
+/// ledger size, never just the returned page's length. Fetch older entries via
+/// `GET /api/snippets/{id}/history`.
 pub async fn get_snippet(
     State(state): State<ControlState>,
     caller: Caller,
     Path(raw_id): Path<String>,
+    Query(query): Query<PageQuery>,
 ) -> Result<Json<SnippetDetail>, ApiError> {
     let id = RouteId::parse(&raw_id).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    let limit = PageLimit::parse(query.parsed_limit()?)?;
 
     let meta = state
         .repo
@@ -355,16 +452,13 @@ pub async fn get_snippet(
 
     authorize_write(&caller, meta.owner_id.as_deref())?;
 
-    let history = state.repo.list_history(&id).await?;
-    let history_count = history.len();
-    let history = history
-        .into_iter()
-        .map(|h| HistoryItem {
-            target_hash: h.target_hash,
-            editor_id: h.editor_id,
-            changed_at: h.changed_at,
-        })
-        .collect();
+    let history_count = state.repo.history_count(&id).await?;
+    let rows = state
+        .repo
+        .list_history_page(&id, None, limit.as_i64() + 1)
+        .await?;
+    let (history, history_next_cursor) =
+        build_history_page(rows, limit, history_count, 0, &state.signer);
 
     Ok(Json(SnippetDetail {
         id: id.into_inner(),
@@ -372,7 +466,98 @@ pub async fn get_snippet(
         owner_id: meta.owner_id,
         history_count,
         history,
+        history_next_cursor,
+        history_limit: limit.as_u32(),
     }))
+}
+
+/// `GET /api/snippets/{id}/history` — fetch an older page of a route's
+/// version ledger, resuming from a `next_cursor` returned by a previous call
+/// to this endpoint or to `GET /api/snippets/{id}`.
+pub async fn get_snippet_history(
+    State(state): State<ControlState>,
+    caller: Caller,
+    Path(raw_id): Path<String>,
+    Query(query): Query<PageQuery>,
+) -> Result<Json<HistoryPageResponse>, ApiError> {
+    let id = RouteId::parse(&raw_id).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    let limit = PageLimit::parse(query.parsed_limit()?)?;
+    let cursor = HistoryCursor::parse(query.cursor.as_deref(), &state.signer)?;
+
+    let meta = state
+        .repo
+        .fetch_route_meta(&id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+
+    authorize_write(&caller, meta.owner_id.as_deref())?;
+
+    // A cursor carries forward the snapshot this scan began with, so version
+    // numbers stay stable even if the ledger grows mid-pagination; the first
+    // call to this endpoint (no cursor) takes a fresh snapshot instead.
+    let (after, snapshot_total, loaded_count_before) = match cursor {
+        Some(c) => (Some((c.changed_at, c.id)), c.snapshot_total, c.loaded_count),
+        None => (None, state.repo.history_count(&id).await?, 0),
+    };
+
+    let rows = state
+        .repo
+        .list_history_page(&id, after, limit.as_i64() + 1)
+        .await?;
+    let (history, next_cursor) = build_history_page(
+        rows,
+        limit,
+        snapshot_total,
+        loaded_count_before,
+        &state.signer,
+    );
+
+    Ok(Json(HistoryPageResponse {
+        history,
+        next_cursor,
+        limit: limit.as_u32(),
+    }))
+}
+
+/// Split a `limit + 1`-row history fetch into a page, compute each entry's
+/// stable `version_number`/`is_current` from the pagination snapshot, and mint
+/// the `next_cursor` when another page follows.
+fn build_history_page(
+    rows: Vec<HistoryEntry>,
+    limit: PageLimit,
+    snapshot_total: i64,
+    loaded_count_before: i64,
+    signer: &IdSigner,
+) -> (Vec<HistoryItem>, Option<String>) {
+    let (page, has_more) = take_page(rows, limit);
+
+    let items: Vec<HistoryItem> = page
+        .iter()
+        .enumerate()
+        .map(|(i, h)| {
+            let global_index = loaded_count_before + i as i64;
+            HistoryItem {
+                target_hash: h.target_hash.clone(),
+                editor_id: h.editor_id.clone(),
+                changed_at: h.changed_at,
+                version_number: snapshot_total - global_index,
+                is_current: global_index == 0,
+            }
+        })
+        .collect();
+
+    let next_cursor = has_more.then(|| {
+        let last = page.last().expect("has_more implies a non-empty page");
+        HistoryCursor {
+            changed_at: last.changed_at,
+            id: last.id,
+            snapshot_total,
+            loaded_count: loaded_count_before + page.len() as i64,
+        }
+        .encode(signer)
+    });
+
+    (items, next_cursor)
 }
 
 /// `GET /api/snippets/{id}/versions/{hash}` — return the content of one
