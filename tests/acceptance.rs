@@ -12,15 +12,19 @@
 //! as the binary wires them — and drives them over real HTTP with `reqwest`.
 #![cfg(feature = "integration")]
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
+use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde_json::{Value, json};
 use serval::api;
-use serval::auth::{AuthConfig, AuthService};
+use serval::auth::{AuthConfig, AuthService, OAuthSettings};
 use serval::cache::DeliveryCache;
 use serval::crypto::IdSigner;
 use serval::db::{self, Repository};
 use serval::delivery;
 use serval::state::{ControlState, DeliveryState};
 use std::sync::Arc;
+use std::time::Duration;
 use testcontainers::ContainerAsync;
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
@@ -320,6 +324,35 @@ impl Harness {
             .await
             .expect("conditional delivery request")
     }
+
+    /// A raw Control Plane request, returning only the status — used to
+    /// assert 4xx/404 boundaries without requiring a decodable success body.
+    async fn raw_status(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&Value>,
+    ) -> reqwest::StatusCode {
+        let mut req = self
+            .client
+            .request(method, format!("{}{path}", self.control_base));
+        if let Some(b) = body {
+            req = req.json(b);
+        }
+        req.send().await.expect("request").status()
+    }
+
+    /// `POST /api/snippets` returning only the status, for asserting
+    /// create-time validation failures without needing a success body.
+    async fn create_status(&self, body: Value) -> reqwest::StatusCode {
+        self.client
+            .post(format!("{}/api/snippets", self.control_base))
+            .json(&body)
+            .send()
+            .await
+            .expect("create request")
+            .status()
+    }
 }
 
 /// Bind an ephemeral loopback port and serve `router` on it in a task.
@@ -332,6 +365,168 @@ async fn serve(router: axum::Router) -> String {
         axum::serve(listener, router).await.expect("serve");
     });
     format!("http://{addr}")
+}
+
+/// Serve a minimal JWKS document over HTTP containing one symmetric (`oct`)
+/// key, so [`AuthService::new`]'s real JWKS fetch has something genuine to
+/// validate against — no RSA keypair or `use_pem` machinery needed, since the
+/// JWKS parser already supports `"kty": "oct"` for exactly this purpose.
+async fn start_jwks_server(secret: &[u8], kid: &str) -> String {
+    let jwks = json!({
+        "keys": [{
+            "kty": "oct",
+            "kid": kid,
+            "k": STANDARD.encode(secret),
+        }]
+    });
+    let router = axum::Router::new().route(
+        "/jwks.json",
+        axum::routing::get(move || {
+            let jwks = jwks.clone();
+            async move { axum::Json(jwks) }
+        }),
+    );
+    format!("{}/jwks.json", serve(router).await)
+}
+
+/// A running Serval under test wired for real `AuthMode::Oauth` enforcement,
+/// backed by a self-hosted JWKS server — exercising the ownership/admin
+/// authorization boundary end-to-end, which `AuthConfig::None` (a fixed
+/// superuser identity) cannot reach at all.
+struct OAuthHarness {
+    control_base: String,
+    client: reqwest::Client,
+    repo: Repository,
+    jwt_secret: Vec<u8>,
+    kid: String,
+    issuer: String,
+    audience: String,
+    _pg: ContainerAsync<Postgres>,
+}
+
+impl OAuthHarness {
+    async fn start() -> Self {
+        let pg = Postgres::default()
+            .start()
+            .await
+            .expect("failed to start postgres container");
+        let host = pg.get_host().await.expect("container host");
+        let port = pg
+            .get_host_port_ipv4(5432)
+            .await
+            .expect("container port mapping");
+        let database_url = format!("postgres://postgres:postgres@{host}:{port}/postgres");
+
+        let pool = db::connect(&database_url, 8)
+            .await
+            .expect("failed to connect and apply schema");
+        let repo = Repository::new(pool);
+
+        let jwt_secret = b"acceptance-suite-oauth-shared-secret".to_vec();
+        let kid = "acceptance-test-key".to_owned();
+        let issuer = "https://issuer.example.test".to_owned();
+        let audience = "serval-acceptance".to_owned();
+        let jwks_url = start_jwks_server(&jwt_secret, &kid).await;
+
+        let auth = Arc::new(
+            AuthService::new(AuthConfig::Oauth(OAuthSettings {
+                issuer: issuer.clone(),
+                audience: audience.clone(),
+                jwks_url,
+                jwks_cache_ttl: Duration::from_secs(300),
+                client_id: "test-client".to_owned(),
+                scopes: "openid".to_owned(),
+                redirect_uri: "http://localhost/callback".to_owned(),
+            }))
+            .await
+            .expect("oauth auth service"),
+        );
+
+        let cache = DeliveryCache::new(32 * 1024 * 1024);
+        let signer = IdSigner::new(TEST_ID_SECRET);
+        let control_state = ControlState {
+            repo: repo.clone(),
+            cache,
+            auth,
+            signer,
+            data_plane_url: None,
+        };
+        let control_base = serve(api::router(control_state)).await;
+
+        Self {
+            control_base,
+            client: reqwest::Client::new(),
+            repo,
+            jwt_secret,
+            kid,
+            issuer,
+            audience,
+            _pg: pg,
+        }
+    }
+
+    /// Mint a valid, freshly-expiring JWT for `sub`.
+    fn token(&self, sub: &str) -> String {
+        self.token_with_exp(sub, chrono::Utc::now() + chrono::Duration::hours(1))
+    }
+
+    /// Mint a JWT for `sub` with an explicit expiry, for testing the expired-
+    /// token boundary.
+    fn token_with_exp(&self, sub: &str, exp: chrono::DateTime<chrono::Utc>) -> String {
+        let mut header = Header::new(Algorithm::HS256);
+        header.kid = Some(self.kid.clone());
+        let claims = json!({
+            "sub": sub,
+            "iss": self.issuer,
+            "aud": self.audience,
+            "exp": exp.timestamp(),
+        });
+        encode(
+            &header,
+            &claims,
+            &EncodingKey::from_secret(&self.jwt_secret),
+        )
+        .expect("mint jwt")
+    }
+
+    /// `POST /api/snippets` authenticated as `sub`; asserts success.
+    async fn create_as(&self, sub: &str, body: Value) -> Value {
+        let resp = self
+            .client
+            .post(format!("{}/api/snippets", self.control_base))
+            .bearer_auth(self.token(sub))
+            .json(&body)
+            .send()
+            .await
+            .expect("create request");
+        assert!(
+            resp.status().is_success(),
+            "create failed: {}",
+            resp.status()
+        );
+        resp.json().await.expect("create json")
+    }
+
+    /// A raw Control Plane request authenticated as `sub` (or unauthenticated
+    /// if `None`), returning only the status.
+    async fn status_as(
+        &self,
+        sub: Option<&str>,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&Value>,
+    ) -> reqwest::StatusCode {
+        let mut req = self
+            .client
+            .request(method, format!("{}{path}", self.control_base));
+        if let Some(s) = sub {
+            req = req.bearer_auth(self.token(s));
+        }
+        if let Some(b) = body {
+            req = req.json(b);
+        }
+        req.send().await.expect("request").status()
+    }
 }
 
 /// Acceptance criterion #1: a Control Plane update is reflected on the very next
@@ -942,5 +1137,783 @@ async fn history_page_rejects_invalid_limit_and_cursor() {
         h.history_status(&id, &[("cursor", list_cursor)]).await,
         reqwest::StatusCode::BAD_REQUEST,
         "a snippets-list cursor must not be accepted by the history endpoint"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Authorization boundary (requires real JWT identities; `AuthConfig::None`
+// always yields one fixed superuser and so cannot reach this boundary at all).
+// ---------------------------------------------------------------------------
+
+/// Ownership is a hard authorization boundary: a non-owner, non-admin caller
+/// must be rejected — with `403`, not `404` (existence is not hidden from a
+/// stranger, only access is) — from every read and write on someone else's
+/// snippet, and their own listing must never surface it.
+#[tokio::test]
+async fn ownership_forbids_cross_user_access() {
+    let h = OAuthHarness::start().await;
+
+    let created = h
+        .create_as("alice", json!({ "content": "alice's secret" }))
+        .await;
+    let id = created["id"].as_str().expect("id").to_owned();
+
+    let cases: Vec<(reqwest::Method, String, Option<Value>)> = vec![
+        (reqwest::Method::GET, format!("/api/snippets/{id}"), None),
+        (
+            reqwest::Method::PATCH,
+            format!("/api/snippets/{id}"),
+            Some(json!({ "content": "hijacked" })),
+        ),
+        (
+            reqwest::Method::GET,
+            format!("/api/snippets/{id}/history"),
+            None,
+        ),
+        (
+            reqwest::Method::GET,
+            format!("/api/snippets/{id}/versions/{}", "A".repeat(64)),
+            None,
+        ),
+        (
+            reqwest::Method::POST,
+            format!("/api/snippets/{id}/restore"),
+            Some(json!({ "target_hash": "A".repeat(64) })),
+        ),
+    ];
+    for (method, path, body) in cases {
+        let status = h
+            .status_as(Some("bob"), method.clone(), &path, body.as_ref())
+            .await;
+        assert_eq!(
+            status,
+            reqwest::StatusCode::FORBIDDEN,
+            "bob must be forbidden from {method} {path} on alice's snippet, got {status}"
+        );
+    }
+
+    // Bob's own listing must not surface alice's snippet.
+    let resp = h
+        .client
+        .get(format!("{}/api/snippets", h.control_base))
+        .bearer_auth(h.token("bob"))
+        .send()
+        .await
+        .expect("bob's list request");
+    assert!(resp.status().is_success());
+    let page: Value = resp.json().await.expect("list json");
+    assert_eq!(
+        page["snippets"].as_array().expect("snippets").len(),
+        0,
+        "bob must not see alice's snippets in his own listing"
+    );
+}
+
+/// The admin role is a global escape hatch: once granted (via the local users
+/// table, the out-of-band mechanism documented on `Repository::set_admin`), a
+/// caller may read and write any user's snippet, bypassing ownership.
+#[tokio::test]
+async fn admin_role_grants_cross_user_access() {
+    let h = OAuthHarness::start().await;
+
+    let created = h
+        .create_as("alice", json!({ "content": "alice's content" }))
+        .await;
+    let id = created["id"].as_str().expect("id").to_owned();
+
+    // Bob is an ordinary stranger until promoted.
+    assert_eq!(
+        h.status_as(
+            Some("bob"),
+            reqwest::Method::GET,
+            &format!("/api/snippets/{id}"),
+            None
+        )
+        .await,
+        reqwest::StatusCode::FORBIDDEN,
+        "bob must be forbidden before promotion"
+    );
+
+    h.repo.set_admin("bob", true).await.expect("grant admin");
+
+    assert_eq!(
+        h.status_as(
+            Some("bob"),
+            reqwest::Method::GET,
+            &format!("/api/snippets/{id}"),
+            None
+        )
+        .await,
+        reqwest::StatusCode::OK,
+        "an admin must be able to read another user's snippet"
+    );
+    assert_eq!(
+        h.status_as(
+            Some("bob"),
+            reqwest::Method::PATCH,
+            &format!("/api/snippets/{id}"),
+            Some(&json!({ "content": "admin edit" })),
+        )
+        .await,
+        reqwest::StatusCode::OK,
+        "an admin must be able to write another user's snippet"
+    );
+}
+
+/// Every way a bearer token can fail to authenticate is rejected with `401`,
+/// never a `500` or a silent pass-through: absent credentials, a non-bearer
+/// scheme, an expired token, a token for the wrong audience, and a token whose
+/// `kid` is not present in the JWKS (even after the forced-refresh retry).
+#[tokio::test]
+async fn invalid_or_expired_tokens_are_rejected() {
+    let h = OAuthHarness::start().await;
+    let me = format!("{}/api/me", h.control_base);
+
+    let resp = h.client.get(&me).send().await.expect("no-auth request");
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "missing credentials must be rejected"
+    );
+
+    let resp = h
+        .client
+        .get(&me)
+        .header("Authorization", "Basic dXNlcjpwYXNz")
+        .send()
+        .await
+        .expect("non-bearer request");
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "a non-bearer scheme must be rejected"
+    );
+
+    let expired = h.token_with_exp("alice", chrono::Utc::now() - chrono::Duration::hours(1));
+    let resp = h
+        .client
+        .get(&me)
+        .bearer_auth(expired)
+        .send()
+        .await
+        .expect("expired-token request");
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "an expired token must be rejected"
+    );
+
+    let mut wrong_aud_header = Header::new(Algorithm::HS256);
+    wrong_aud_header.kid = Some(h.kid.clone());
+    let wrong_aud_claims = json!({
+        "sub": "alice",
+        "iss": h.issuer,
+        "aud": "some-other-audience",
+        "exp": (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp(),
+    });
+    let wrong_aud = encode(
+        &wrong_aud_header,
+        &wrong_aud_claims,
+        &EncodingKey::from_secret(&h.jwt_secret),
+    )
+    .expect("mint wrong-audience jwt");
+    let resp = h
+        .client
+        .get(&me)
+        .bearer_auth(wrong_aud)
+        .send()
+        .await
+        .expect("wrong-audience request");
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "a token for a different audience must be rejected"
+    );
+
+    let mut unknown_kid_header = Header::new(Algorithm::HS256);
+    unknown_kid_header.kid = Some("no-such-key".to_owned());
+    let unknown_kid_claims = json!({
+        "sub": "alice",
+        "iss": h.issuer,
+        "aud": h.audience,
+        "exp": (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp(),
+    });
+    let unknown_kid = encode(
+        &unknown_kid_header,
+        &unknown_kid_claims,
+        &EncodingKey::from_secret(&h.jwt_secret),
+    )
+    .expect("mint unknown-kid jwt");
+    let resp = h
+        .client
+        .get(&me)
+        .bearer_auth(unknown_kid)
+        .send()
+        .await
+        .expect("unknown-kid request");
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "a token with an unrecognized key id must be rejected"
+    );
+
+    // Sanity check: a genuinely valid token still authenticates.
+    let resp = h
+        .client
+        .get(&me)
+        .bearer_auth(h.token("alice"))
+        .send()
+        .await
+        .expect("valid-token request");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let me_body: Value = resp.json().await.expect("me json");
+    assert_eq!(me_body["user_id"], json!("alice"));
+    assert_eq!(me_body["is_admin"], json!(false));
+}
+
+// ---------------------------------------------------------------------------
+// Not-found / bad-request boundaries.
+// ---------------------------------------------------------------------------
+
+/// Every read/write under `/api/snippets/{id}` on a well-formed but
+/// nonexistent id must `404` — never a `500`, and never silently treated as if
+/// the route existed.
+#[tokio::test]
+async fn not_found_sweep_for_nonexistent_route() {
+    let h = Harness::start().await;
+    let nonexistent = h.signer.random_id();
+    let some_hash = h.signer.content_id("irrelevant content");
+
+    let cases: Vec<(reqwest::Method, String, Option<Value>)> = vec![
+        (
+            reqwest::Method::GET,
+            format!("/api/snippets/{nonexistent}"),
+            None,
+        ),
+        (
+            reqwest::Method::PATCH,
+            format!("/api/snippets/{nonexistent}"),
+            Some(json!({ "content": "x" })),
+        ),
+        (
+            reqwest::Method::GET,
+            format!("/api/snippets/{nonexistent}/history"),
+            None,
+        ),
+        (
+            reqwest::Method::GET,
+            format!("/api/snippets/{nonexistent}/versions/{some_hash}"),
+            None,
+        ),
+        (
+            reqwest::Method::POST,
+            format!("/api/snippets/{nonexistent}/restore"),
+            Some(json!({ "target_hash": some_hash })),
+        ),
+    ];
+    for (method, path, body) in cases {
+        let status = h.raw_status(method.clone(), &path, body.as_ref()).await;
+        assert_eq!(
+            status,
+            reqwest::StatusCode::NOT_FOUND,
+            "{method} {path} on a nonexistent route must 404, got {status}"
+        );
+    }
+}
+
+/// A structurally invalid route id (wrong length or illegal characters) is
+/// rejected at the validation boundary with `400`, distinct from the `404` a
+/// well-formed-but-unknown id receives — the client can tell "malformed
+/// request" from "not found" apart.
+#[tokio::test]
+async fn malformed_ids_are_bad_request_not_not_found() {
+    let h = Harness::start().await;
+    let too_short = "abc";
+    let illegal_chars = "!".repeat(64);
+    let valid_hash = h.signer.content_id("whatever");
+
+    for bad in [too_short, illegal_chars.as_str()] {
+        assert_eq!(
+            h.raw_status(reqwest::Method::GET, &format!("/api/snippets/{bad}"), None)
+                .await,
+            reqwest::StatusCode::BAD_REQUEST,
+            "malformed route id {bad:?} must 400, not 404"
+        );
+        assert_eq!(
+            h.raw_status(
+                reqwest::Method::GET,
+                &format!("/api/snippets/{bad}/versions/{valid_hash}"),
+                None
+            )
+            .await,
+            reqwest::StatusCode::BAD_REQUEST,
+            "malformed route id {bad:?} in a version fetch must 400"
+        );
+    }
+
+    // A well-formed route id but a malformed hash segment/body field.
+    let created = h.create(json!({ "content": "v0" })).await;
+    let id = created["id"].as_str().expect("id");
+    assert_eq!(
+        h.raw_status(
+            reqwest::Method::GET,
+            &format!("/api/snippets/{id}/versions/{too_short}"),
+            None
+        )
+        .await,
+        reqwest::StatusCode::BAD_REQUEST,
+        "malformed hash in a version fetch must 400"
+    );
+    assert_eq!(
+        h.raw_status(
+            reqwest::Method::POST,
+            &format!("/api/snippets/{id}/restore"),
+            Some(&json!({ "target_hash": too_short })),
+        )
+        .await,
+        reqwest::StatusCode::BAD_REQUEST,
+        "malformed target_hash in a restore body must 400"
+    );
+}
+
+/// A hash that is a genuine version of one route must never be readable or
+/// restorable through a *different* route's id — the CAS layer deduplicates
+/// storage, but the ledger's `route_id` scoping must still isolate routes.
+#[tokio::test]
+async fn version_and_restore_are_scoped_to_their_own_route() {
+    let h = Harness::start().await;
+
+    let a = h.create(json!({ "content": "route A v0" })).await;
+    let a_id = a["id"].as_str().expect("id").to_owned();
+    h.update(&a_id, "route A v1").await;
+    let a_detail = h.detail(&a_id).await;
+    let a_original_hash = a_detail["history"][1]["target_hash"]
+        .as_str()
+        .expect("original hash")
+        .to_owned();
+
+    let b = h.create(json!({ "content": "route B v0" })).await;
+    let b_id = b["id"].as_str().expect("id").to_owned();
+
+    // The hash genuinely is a version of route A.
+    let v = h.version(&a_id, &a_original_hash).await;
+    assert_eq!(v["content"], json!("route A v0"));
+
+    // But reading it through route B's id must 404 — it is not B's version.
+    assert_eq!(
+        h.raw_status(
+            reqwest::Method::GET,
+            &format!("/api/snippets/{b_id}/versions/{a_original_hash}"),
+            None
+        )
+        .await,
+        reqwest::StatusCode::NOT_FOUND,
+        "a hash belonging to another route must not be readable through this route's id"
+    );
+
+    // And restoring B to it must be rejected as not-a-version-of-this-route.
+    assert_eq!(
+        h.raw_status(
+            reqwest::Method::POST,
+            &format!("/api/snippets/{b_id}/restore"),
+            Some(&json!({ "target_hash": a_original_hash })),
+        )
+        .await,
+        reqwest::StatusCode::BAD_REQUEST,
+        "restoring to a hash that is not a genuine version of this route must be rejected"
+    );
+}
+
+/// A partial update must change something: a `PATCH` body with no recognized
+/// fields is rejected with `400` rather than silently succeeding as a no-op.
+#[tokio::test]
+async fn update_requires_at_least_one_field() {
+    let h = Harness::start().await;
+    let created = h.create(json!({ "content": "v0" })).await;
+    let id = created["id"].as_str().expect("id").to_owned();
+
+    assert_eq!(
+        h.raw_status(
+            reqwest::Method::PATCH,
+            &format!("/api/snippets/{id}"),
+            Some(&json!({})),
+        )
+        .await,
+        reqwest::StatusCode::BAD_REQUEST,
+        "an update with no fields must be rejected"
+    );
+}
+
+/// Metadata validation (overlong or illegal-header `content_type`; overlong
+/// `title`/`description`) is enforced identically at creation and at update,
+/// and the exact length boundary is accepted rather than off-by-one rejected.
+#[tokio::test]
+async fn create_and_update_reject_invalid_metadata() {
+    let h = Harness::start().await;
+
+    assert_eq!(
+        h.create_status(json!({ "content": "x", "content_type": "bad\nvalue" }))
+            .await,
+        reqwest::StatusCode::BAD_REQUEST,
+        "a content_type with illegal header bytes must be rejected at create"
+    );
+    assert_eq!(
+        h.create_status(json!({ "content": "x", "content_type": "a".repeat(256) }))
+            .await,
+        reqwest::StatusCode::BAD_REQUEST,
+        "an overlong content_type must be rejected at create"
+    );
+    assert_eq!(
+        h.create_status(json!({ "content": "x", "title": "a".repeat(256) }))
+            .await,
+        reqwest::StatusCode::BAD_REQUEST,
+        "an overlong title must be rejected at create"
+    );
+    assert_eq!(
+        h.create_status(json!({ "content": "x", "description": "a".repeat(4097) }))
+            .await,
+        reqwest::StatusCode::BAD_REQUEST,
+        "an overlong description must be rejected at create"
+    );
+
+    let created = h.create(json!({ "content": "v0" })).await;
+    let id = created["id"].as_str().expect("id").to_owned();
+    assert_eq!(
+        h.raw_status(
+            reqwest::Method::PATCH,
+            &format!("/api/snippets/{id}"),
+            Some(&json!({ "content_type": "bad\nvalue" })),
+        )
+        .await,
+        reqwest::StatusCode::BAD_REQUEST,
+        "the same content_type validation must apply on update"
+    );
+
+    // Exactly at the boundary (255 chars) must be accepted, not rejected.
+    let exact_title = "a".repeat(255);
+    let boundary = h
+        .create(json!({ "content": "boundary", "title": exact_title.clone() }))
+        .await;
+    assert_eq!(
+        boundary["title"],
+        json!(exact_title),
+        "a title at exactly the length cap must be accepted"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Content-addressing / ledger idempotence boundaries.
+// ---------------------------------------------------------------------------
+
+/// Empty content has no special-cased rejection: it is a legitimate, if
+/// degenerate, template and must round-trip through creation and delivery.
+#[tokio::test]
+async fn empty_content_is_permitted_and_deliverable() {
+    let h = Harness::start().await;
+    let created = h.create(json!({ "content": "" })).await;
+    let id = created["id"].as_str().expect("id").to_owned();
+    let (body, _) = h.deliver(&id).await;
+    assert_eq!(body, "", "empty content must be stored and served verbatim");
+}
+
+/// Two unrelated routes created with byte-identical content dedup to the same
+/// immutable content block, but remain fully independent routes: updating one
+/// must never affect the other.
+#[tokio::test]
+async fn identical_content_across_routes_shares_storage_but_stays_independent() {
+    let h = Harness::start().await;
+
+    let a = h.create(json!({ "content": "shared payload" })).await;
+    let b = h.create(json!({ "content": "shared payload" })).await;
+    let a_id = a["id"].as_str().expect("id").to_owned();
+    let b_id = b["id"].as_str().expect("id").to_owned();
+    assert_ne!(
+        a_id, b_id,
+        "routes must have distinct random ids even with identical content"
+    );
+
+    let a_detail = h.detail(&a_id).await;
+    let b_detail = h.detail(&b_id).await;
+    let a_hash = a_detail["history"][0]["target_hash"]
+        .as_str()
+        .expect("a hash");
+    let b_hash = b_detail["history"][0]["target_hash"]
+        .as_str()
+        .expect("b hash");
+    assert_eq!(
+        a_hash, b_hash,
+        "identical content must dedup to the same content-block hash"
+    );
+
+    h.update(&a_id, "only A now").await;
+    let (body_a, _) = h.deliver(&a_id).await;
+    let (body_b, _) = h.deliver(&b_id).await;
+    assert_eq!(body_a, "only A now");
+    assert_eq!(
+        body_b, "shared payload",
+        "routes sharing a content block must stay independently mutable"
+    );
+}
+
+/// Repointing a route at content byte-identical to its current version is
+/// still a genuine update: it must append a ledger row like any other update,
+/// not be silently treated as a no-op.
+#[tokio::test]
+async fn updating_to_identical_content_still_appends_history() {
+    let h = Harness::start().await;
+    let created = h.create(json!({ "content": "same" })).await;
+    let id = created["id"].as_str().expect("id").to_owned();
+
+    h.update(&id, "same").await;
+
+    let detail = h.detail(&id).await;
+    assert_eq!(
+        detail["history_count"].as_u64(),
+        Some(2),
+        "a content-identical update must still append a ledger row"
+    );
+}
+
+/// Restoring a route to its own current version is still a genuine restore:
+/// it must append a fresh ledger row, matching "every update appends," not be
+/// treated as a no-op because the target hash already matches.
+#[tokio::test]
+async fn restoring_current_version_still_appends_history() {
+    let h = Harness::start().await;
+    let created = h.create(json!({ "content": "v0" })).await;
+    let id = created["id"].as_str().expect("id").to_owned();
+    let detail = h.detail(&id).await;
+    let current_hash = detail["history"][0]["target_hash"]
+        .as_str()
+        .expect("current hash")
+        .to_owned();
+
+    h.restore(&id, &current_hash).await;
+
+    let detail2 = h.detail(&id).await;
+    assert_eq!(
+        detail2["history_count"].as_u64(),
+        Some(2),
+        "restoring the current version must still append a ledger row"
+    );
+    assert_eq!(detail2["history"][0]["target_hash"], json!(current_hash));
+}
+
+// ---------------------------------------------------------------------------
+// Pagination boundaries.
+// ---------------------------------------------------------------------------
+
+/// An owner with zero routes gets an empty page and no `next_cursor` — the
+/// degenerate zero-item boundary, distinct from every other pagination test
+/// which starts from at least one item.
+#[tokio::test]
+async fn empty_snippet_list_has_no_next_cursor() {
+    let h = Harness::start().await;
+    let page = h.list(&[]).await;
+    assert_eq!(page["snippets"].as_array().expect("snippets").len(), 0);
+    assert!(page["next_cursor"].is_null());
+}
+
+/// Requesting exactly as many rows as exist must not report a `next_cursor` —
+/// the classic off-by-one risk in a "fetch limit+1, truncate" pagination
+/// scheme, where the boundary is requesting precisely the remaining count.
+#[tokio::test]
+async fn list_snippets_exact_page_boundary_has_no_next_cursor() {
+    let h = Harness::start().await;
+    for i in 0..3 {
+        h.create(json!({ "content": format!("s{i}") })).await;
+    }
+
+    let page = h.list(&[("limit", "3")]).await;
+    assert_eq!(page["snippets"].as_array().expect("snippets").len(), 3);
+    assert!(
+        page["next_cursor"].is_null(),
+        "requesting exactly the remaining count must not report a next page"
+    );
+}
+
+/// The same exact-boundary condition, for the embedded history page on the
+/// snippet detail endpoint.
+#[tokio::test]
+async fn history_exact_page_boundary_has_no_next_cursor() {
+    let h = Harness::start().await;
+    let created = h.create(json!({ "content": "v0" })).await;
+    let id = created["id"].as_str().expect("id").to_owned();
+    for i in 1..=4 {
+        h.update(&id, &format!("v{i}")).await;
+    }
+
+    let resp = h
+        .client
+        .get(format!("{}/api/snippets/{id}?limit=5", h.control_base))
+        .send()
+        .await
+        .expect("detail request");
+    assert!(resp.status().is_success());
+    let detail: Value = resp.json().await.expect("detail json");
+    assert_eq!(detail["history"].as_array().expect("history").len(), 5);
+    assert!(
+        detail["history_next_cursor"].is_null(),
+        "requesting exactly the remaining history count must not report a next page"
+    );
+}
+
+/// A cursor is stateless, MAC-protected pagination *position* — not a
+/// server-side consumed token — so replaying the same cursor value twice must
+/// yield byte-identical pages.
+#[tokio::test]
+async fn pagination_cursor_is_idempotent_and_replayable() {
+    let h = Harness::start().await;
+    for i in 0..5 {
+        h.create(json!({ "content": format!("s{i}") })).await;
+    }
+
+    let page1 = h.list(&[("limit", "2")]).await;
+    let cursor = page1["next_cursor"]
+        .as_str()
+        .expect("more pages remain")
+        .to_owned();
+
+    let page2a = h.list(&[("limit", "2"), ("cursor", &cursor)]).await;
+    let page2b = h.list(&[("limit", "2"), ("cursor", &cursor)]).await;
+    assert_eq!(
+        page2a, page2b,
+        "replaying the same cursor must be idempotent"
+    );
+}
+
+/// A cursor with a valid shape but a tampered MAC (as opposed to plainly
+/// malformed base64/JSON) must still be rejected with `400` — proving the MAC
+/// is actually checked, not just base64/JSON well-formedness.
+#[tokio::test]
+async fn tampered_cursor_mac_is_rejected() {
+    let h = Harness::start().await;
+    for i in 0..3 {
+        h.create(json!({ "content": format!("s{i}") })).await;
+    }
+
+    let page = h.list(&[("limit", "1")]).await;
+    let cursor = page["next_cursor"]
+        .as_str()
+        .expect("more pages remain")
+        .to_owned();
+    let mut chars: Vec<char> = cursor.chars().collect();
+    let last = chars.len() - 1;
+    chars[last] = if chars[last] == 'A' { 'B' } else { 'A' };
+    let tampered: String = chars.into_iter().collect();
+
+    assert_eq!(
+        h.list_status(&[("cursor", &tampered)]).await,
+        reqwest::StatusCode::BAD_REQUEST,
+        "a cursor with a tampered MAC must be rejected"
+    );
+}
+
+/// A history cursor is not tagged with the route it was minted for — only
+/// with its endpoint *kind*. Replaying one route's history cursor against a
+/// *different* route's history endpoint must never surface rows outside that
+/// path route's own ledger: the `route_id` in the URL, not the cursor, is
+/// what scopes every returned row.
+#[tokio::test]
+async fn history_cursor_from_another_route_stays_scoped_to_the_path_route() {
+    let h = Harness::start().await;
+
+    let a = h.create(json!({ "content": "a0" })).await;
+    let a_id = a["id"].as_str().expect("id").to_owned();
+    h.update(&a_id, "a1").await;
+    h.update(&a_id, "a2").await;
+
+    let b = h.create(json!({ "content": "b0" })).await;
+    let b_id = b["id"].as_str().expect("id").to_owned();
+    h.update(&b_id, "b1").await;
+    h.update(&b_id, "b2").await;
+
+    let a_page = h.history_page(&a_id, &[("limit", "1")]).await;
+    let a_cursor = a_page["next_cursor"]
+        .as_str()
+        .expect("route A has more history")
+        .to_owned();
+
+    let b_full = h.history_page(&b_id, &[("limit", "50")]).await;
+    let b_hashes: Vec<String> = b_full["history"]
+        .as_array()
+        .expect("history")
+        .iter()
+        .map(|e| e["target_hash"].as_str().expect("hash").to_owned())
+        .collect();
+
+    let resp = h
+        .client
+        .get(format!("{}/api/snippets/{b_id}/history", h.control_base))
+        .query(&[("cursor", a_cursor.as_str())])
+        .send()
+        .await
+        .expect("cross-route history request");
+    assert!(
+        resp.status().is_success() || resp.status() == reqwest::StatusCode::BAD_REQUEST,
+        "a cross-route cursor must fail cleanly, not 500"
+    );
+    if resp.status().is_success() {
+        let page: Value = resp.json().await.expect("history json");
+        for item in page["history"].as_array().expect("history") {
+            let hash = item["target_hash"].as_str().expect("hash").to_owned();
+            assert!(
+                b_hashes.contains(&hash),
+                "a history cursor minted for another route must never surface rows outside \
+                 the path route's own ledger"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Delivery hardening and rendering edge cases.
+// ---------------------------------------------------------------------------
+
+/// Every delivery response carries the hardened, content-agnostic security
+/// headers regardless of the stored content type — proving the defusing
+/// happens at the response-header layer, not by rewriting attacker content.
+#[tokio::test]
+async fn delivery_responses_carry_hardened_security_headers() {
+    let h = Harness::start().await;
+    let created = h
+        .create(json!({
+            "content": "<script>alert(1)</script>",
+            "content_type": "text/html; charset=utf-8"
+        }))
+        .await;
+    let id = created["id"].as_str().expect("id").to_owned();
+
+    let (_, headers) = h.deliver(&id).await;
+    assert_eq!(
+        headers
+            .get("x-content-type-options")
+            .and_then(|v| v.to_str().ok()),
+        Some("nosniff")
+    );
+    assert_eq!(
+        headers.get("referrer-policy").and_then(|v| v.to_str().ok()),
+        Some("no-referrer")
+    );
+    assert_eq!(
+        headers
+            .get("content-security-policy")
+            .and_then(|v| v.to_str().ok()),
+        Some("default-src 'none'; sandbox")
+    );
+}
+
+/// A repeated query key is not a rendering hazard: `form_urlencoded`'s
+/// last-value-wins semantics apply, deterministically, end-to-end.
+#[tokio::test]
+async fn repeated_query_params_use_the_last_value() {
+    let h = Harness::start().await;
+    let created = h.create(json!({ "content": "{{name}}" })).await;
+    let id = created["id"].as_str().expect("id").to_owned();
+
+    let (body, _) = h.deliver(&format!("{id}?name=first&name=second")).await;
+    assert_eq!(
+        body, "second",
+        "a duplicated query key must resolve deterministically to the last value"
     );
 }
