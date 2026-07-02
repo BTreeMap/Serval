@@ -128,19 +128,22 @@ export function Dashboard() {
 /** A single row in the snippet list. */
 function SnippetRow({ snippet }: { snippet: SnippetSummary }) {
   // Warm the detail view on hover intent so clicking through feels instant.
+  // Bind to the navigation affordances themselves (the title/id link and the
+  // Details button) rather than the whole card: hovering an actual link is a
+  // genuine intent-to-navigate signal, whereas the card also holds the
+  // non-navigating Copy button and readable metadata a user may just be
+  // scanning. Both links target the same detail route and share one warm.
   const prefetch = useHoverPrefetch(prefetchKey.snippetDetail(snippet.id), () =>
     api.getSnippet(snippet.id),
   );
   return (
     <li>
-      <Card
-        {...prefetch}
-        className="flex flex-col gap-3 p-4 transition-colors hover:border-wisteria/40 sm:flex-row sm:items-center sm:justify-between sm:gap-4 md:p-5 lg:gap-6 lg:p-6"
-      >
+      <Card className="flex flex-col gap-3 p-4 transition-colors hover:border-wisteria/40 sm:flex-row sm:items-center sm:justify-between sm:gap-4 md:p-5 lg:gap-6 lg:p-6">
         <div className="min-w-0">
           {snippet.title ? (
             <>
               <Link
+                {...prefetch}
                 to={`/s/${snippet.id}`}
                 className="block truncate text-sm font-medium text-wisteria-deep hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-wisteria/50"
               >
@@ -152,6 +155,7 @@ function SnippetRow({ snippet }: { snippet: SnippetSummary }) {
             </>
           ) : (
             <Link
+              {...prefetch}
               to={`/s/${snippet.id}`}
               className="block truncate rounded font-mono text-sm text-wisteria-deep hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-wisteria/50"
             >
@@ -172,7 +176,7 @@ function SnippetRow({ snippet }: { snippet: SnippetSummary }) {
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <CopyButton value={deliveryUrl(snippet.id)} label="Copy link" size="sm" />
-          <Link to={`/s/${snippet.id}`}>
+          <Link {...prefetch} to={`/s/${snippet.id}`}>
             <Button variant="secondary" size="sm">
               Details
             </Button>
