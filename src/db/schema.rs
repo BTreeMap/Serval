@@ -82,6 +82,37 @@ pub async fn apply(pool: &PgPool) -> Result<(), sqlx::Error> {
         .execute(pool)
         .await?;
 
+    // Widening the column is only half the migration. On PostgreSQL 10+ a
+    // `SERIAL` also created an *integer* sequence (`... AS integer`) whose own
+    // `max_value` is pinned at 2^31-1, and altering the column type never
+    // touches it. Left as-is, a pre-existing ledger would still overflow at
+    // ~2.1 billion rows the moment `nextval` reaches that cap — silently
+    // defeating the widening above. Promote the owning sequence to `bigint` so
+    // its ceiling rises to 2^63-1, matching the "infinite ledger" contract.
+    //
+    // The sequence name is resolved with `pg_get_serial_sequence` rather than
+    // hardcoding the conventional `pointer_history_id_seq`, so a renamed table
+    // or sequence still migrates. Wrapped in a single `DO` block because sqlx's
+    // extended protocol rejects multi-statement queries and `ALTER SEQUENCE`
+    // needs an identifier, not a bind parameter. Idempotent: `AS bigint` is a
+    // no-op on an already-`bigint` sequence (the case for new `BIGSERIAL`
+    // tables), and the `IF` guard tolerates the sequence being absent.
+    sqlx::query(
+        r"
+        DO $$
+        DECLARE
+            seq text := pg_get_serial_sequence('pointer_history', 'id');
+        BEGIN
+            IF seq IS NOT NULL THEN
+                EXECUTE format('ALTER SEQUENCE %s AS bigint', seq::regclass);
+            END IF;
+        END
+        $$
+        ",
+    )
+    .execute(pool)
+    .await?;
+
     // Accelerates the paginated (keyset) history scan for one route: rows are
     // read in `changed_at DESC, id DESC` order, matching the query's ORDER BY
     // exactly, so a page boundary is a single index range scan.

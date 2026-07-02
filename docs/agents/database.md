@@ -52,7 +52,7 @@ delivery time.
 
 | Column | Type | Constraints | Notes |
 |---|---|---|---|
-| `id` | `BIGSERIAL` | PRIMARY KEY | Internal ledger id; keyset pagination tiebreaker |
+| `id` | `BIGSERIAL` | PRIMARY KEY | Internal ledger id; keyset pagination tiebreaker. Legacy `SERIAL` deployments are migrated by widening **both** the column (`ALTER COLUMN ... TYPE BIGINT`) and its owning sequence (`ALTER SEQUENCE ... AS bigint`) — the column alone leaves the int4 sequence capped at 2³¹−1 |
 | `route_id` | `VARCHAR(64)` | FK → `routes` | The snippet updated |
 | `target_hash` | `VARCHAR(64)` | FK → `content_blocks` | Content hash at this point in time |
 | `editor_id` | `VARCHAR(255)` | NOT NULL | Authenticated user who made the change |
