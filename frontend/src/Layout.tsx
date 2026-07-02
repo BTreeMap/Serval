@@ -1,16 +1,25 @@
 import { Link } from "react-router-dom";
 import { useAuth } from "./auth-context";
+import { api } from "./api";
+import { prefetchKey, useHoverPrefetch } from "./prefetch";
 import { Badge, Button, Icons } from "./ui";
 
 /** The app shell: top bar with identity and sign-out, plus routed content. */
 export function Layout({ children }: { children: React.ReactNode }) {
     const { me, mode, signOut } = useAuth();
+    // The logo is a third route home (alongside the dashboard rows and the
+    // detail back-link), so warm the listing on hover intent too. Shares the
+    // deduped listing key, so it is harmless when already on the dashboard.
+    const homePrefetch = useHoverPrefetch(prefetchKey.snippetsList(), () =>
+        api.listSnippets(),
+    );
 
     return (
         <div className="min-h-full bg-canvas text-ink">
             <header className="sticky top-0 z-20 border-b border-line bg-surface/70 backdrop-blur">
                 <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-x-4 gap-y-2 px-4 py-3 sm:px-6 sm:py-4 lg:px-8 lg:py-5">
                     <Link
+                        {...homePrefetch}
                         to="/"
                         className="flex items-center gap-2 rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-wisteria/50"
                     >
