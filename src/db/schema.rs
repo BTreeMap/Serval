@@ -56,11 +56,14 @@ pub async fn apply(pool: &PgPool) -> Result<(), sqlx::Error> {
         .execute(pool)
         .await?;
 
-    // Append-only version ledger. Never pruned.
+    // Append-only version ledger. Never pruned. `id` is BIGSERIAL (not
+    // SERIAL/int4): as an infinite ledger it must not be capped at ~2.1
+    // billion rows, and it is also the pagination keyset tiebreaker, which the
+    // application layer binds/decodes as `i64` end to end.
     sqlx::query(
         r"
         CREATE TABLE IF NOT EXISTS pointer_history (
-            id SERIAL PRIMARY KEY,
+            id BIGSERIAL PRIMARY KEY,
             route_id VARCHAR(64) NOT NULL REFERENCES routes (id),
             target_hash VARCHAR(64) NOT NULL REFERENCES content_blocks (hash_id),
             editor_id VARCHAR(255) NOT NULL,
@@ -70,6 +73,14 @@ pub async fn apply(pool: &PgPool) -> Result<(), sqlx::Error> {
     )
     .execute(pool)
     .await?;
+
+    // Idempotent migration: widen a pre-existing `id` column from the
+    // original `SERIAL` (int4) to `BIGINT`. A widening integer cast is always
+    // safe and lossless, and this statement is a no-op once the column is
+    // already `bigint`.
+    sqlx::query("ALTER TABLE pointer_history ALTER COLUMN id TYPE BIGINT")
+        .execute(pool)
+        .await?;
 
     // Accelerates the audit-trail lookup for a given route in chronological
     // order without scanning the whole ledger.
