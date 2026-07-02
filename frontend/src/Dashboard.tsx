@@ -21,6 +21,7 @@ import {
   Textarea,
 } from "./ui";
 import { COMMON_CONTENT_TYPES } from "./content-types";
+import { loadPrefetched, prefetchKey, useHoverPrefetch } from "./prefetch";
 
 /** The landing page: a creation form above the caller's existing snippets. */
 export function Dashboard() {
@@ -34,7 +35,9 @@ export function Dashboard() {
   // a newly touched route's updated ordering is always visible immediately.
   const refresh = useCallback(async () => {
     try {
-      const page = await api.listSnippets();
+      const page = await loadPrefetched(prefetchKey.snippetsList(), () =>
+        api.listSnippets(),
+      );
       setSnippets(page.snippets);
       setNextCursor(page.next_cursor);
       setError(null);
@@ -124,9 +127,16 @@ export function Dashboard() {
 
 /** A single row in the snippet list. */
 function SnippetRow({ snippet }: { snippet: SnippetSummary }) {
+  // Warm the detail view on hover intent so clicking through feels instant.
+  const prefetch = useHoverPrefetch(prefetchKey.snippetDetail(snippet.id), () =>
+    api.getSnippet(snippet.id),
+  );
   return (
     <li>
-      <Card className="flex flex-col gap-3 p-4 transition-colors hover:border-wisteria/40 sm:flex-row sm:items-center sm:justify-between sm:gap-4 md:p-5 lg:gap-6 lg:p-6">
+      <Card
+        {...prefetch}
+        className="flex flex-col gap-3 p-4 transition-colors hover:border-wisteria/40 sm:flex-row sm:items-center sm:justify-between sm:gap-4 md:p-5 lg:gap-6 lg:p-6"
+      >
         <div className="min-w-0">
           {snippet.title ? (
             <>

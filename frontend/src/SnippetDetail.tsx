@@ -9,6 +9,7 @@ import {
 } from "./api";
 import { Badge, Banner, Button, Card, Combobox, CopyButton, Icons, InlineField, Loading, Textarea } from "./ui";
 import { COMMON_CONTENT_TYPES } from "./content-types";
+import { loadPrefetched, prefetchKey, useHoverPrefetch } from "./prefetch";
 
 /** Detail view for one snippet: metadata, an editor, and the append-only
  *  version ledger with per-version preview and restore. */
@@ -27,7 +28,9 @@ export function SnippetDetail() {
 
   const refresh = useCallback(async () => {
     try {
-      const next = await api.getSnippet(id);
+      const next = await loadPrefetched(prefetchKey.snippetDetail(id), () =>
+        api.getSnippet(id),
+      );
       setDetail(next);
       setHistory(next.history);
       setHistoryNextCursor(next.history_next_cursor);
@@ -505,8 +508,13 @@ const VersionHistoryRow = memo(function VersionHistoryRow({
 });
 
 function BackLink() {
+  // Warm the dashboard listing so returning from a detail view is instant too.
+  const prefetch = useHoverPrefetch(prefetchKey.snippetsList(), () =>
+    api.listSnippets(),
+  );
   return (
     <Link
+      {...prefetch}
       to="/"
       className="inline-flex items-center gap-2 rounded text-sm text-wisteria-deep hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-wisteria/50"
     >
