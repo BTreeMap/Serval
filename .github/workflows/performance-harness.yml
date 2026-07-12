@@ -10,6 +10,7 @@ on:
       - "src/**"
       - "tests/**"
       - "Cargo.toml"
+      - "Cargo.lock"
       - ".github/workflows/performance-harness.yml"
 
 concurrency:
@@ -235,3 +236,92 @@ jobs:
           name: performance-harness-report
           path: target/performance-harness-report.json
           if-no-files-found: warn
+
+  flamegraphs:
+    name: Representative hot-path flamegraphs
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      # This cache is isolated from the stripped release harness because the
+      # profiling profile retains symbols and forces frame pointers.
+      - name: Cache profiling build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: profiling
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Capture representative flamegraphs
+        run: >-
+          cargo test --profile profiling --locked
+          --features integration,profiling
+          --test performance_harness
+          representative_hot_path_flamegraphs
+          -- --ignored --nocapture
+        env:
+          SERVAL_SKIP_FRONTEND_BUILD: "1"
+          RUSTFLAGS: "-C force-frame-pointers=yes"
+          PERF_REQUEST_TIMEOUT_SECS: "15"
+          PERF_LATENCY_SAMPLE_STRIDE: "24"
+          PERF_LATENCY_SAMPLE_CAPACITY: "250000"
+          PERF_FLAMEGRAPH_OUTPUT_DIR: target/flamegraphs
+          PERF_FLAMEGRAPH_FREQUENCY_HZ: "99"
+          PERF_FLAMEGRAPH_DURATION_SECS: "15"
+          PERF_FLAMEGRAPH_PEAK_CONCURRENCY: "512"
+          PERF_FLAMEGRAPH_ADVERSARIAL_FORGED_CONCURRENCY: "2048"
+          PERF_FLAMEGRAPH_ADVERSARIAL_LEGIT_CONCURRENCY: "64"
+          PERF_FLAMEGRAPH_WRITER_INTERVAL_MS: "120"
+
+      - name: Validate flamegraphs
+        if: always()
+        run: |
+          for graph in target/flamegraphs/peak.svg target/flamegraphs/adversarial.svg; do
+            test -s "$graph"
+            grep -q '<svg' "$graph"
+          done
+
+      - name: Upload flamegraphs
+        id: flamegraph-artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hot-path-flamegraphs
+          path: |
+            target/flamegraphs/peak.svg
+            target/flamegraphs/adversarial.svg
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Generate flamegraph summary
+        if: always()
+        env:
+          ARTIFACT_URL: ${{ steps.flamegraph-artifact.outputs.artifact-url }}
+        run: |
+          {
+            echo '## Hot-Path CPU Flamegraphs'
+            echo
+            if [ -n "$ARTIFACT_URL" ]; then
+              echo "[Download the interactive Peak and Adversarial SVGs]($ARTIFACT_URL)"
+            else
+              echo '> Flamegraph artifacts were not produced. Inspect the profiling step above.'
+            fi
+            echo
+            echo '| Scenario | Representative workload | Sampling |'
+            echo '|---|---|---|'
+            echo '| Peak | 512 concurrent rendered, cache-hot Data Plane reads | 15s at 99 Hz |'
+            echo '| Adversarial | 2,048 forged + 64 legitimate readers + writes every 120ms | 15s at 99 Hz |'
+            echo
+            echo 'Open an SVG in a browser, hover for sample share, and click frames to zoom.'
+            echo 'Search for **serval::delivery**, **IdSigner::verify**, cache, renderer, and database frames.'
+            echo
+            echo '> Profiling is diagnostic. The separate stripped-release harness remains the SLO authority.'
+          } >> "$GITHUB_STEP_SUMMARY"

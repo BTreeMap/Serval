@@ -135,6 +135,7 @@ task. **Hand-authored commit messages MUST follow the
 | CAS schema, models, migrations, the history ledger | [docs/agents/database.md](docs/agents/database.md) |
 | Data Plane delivery, `moka` cache, rendering | [docs/agents/delivery.md](docs/agents/delivery.md) |
 | Tests, CI gate, Dockerized E2E, acceptance criteria | [docs/agents/testing.md](docs/agents/testing.md) |
+| CPU profiling, flamegraphs, performance diagnosis | [docs/agents/profiling.md](docs/agents/profiling.md) |
 | React/TypeScript frontend & embedding | [docs/agents/frontend.md](docs/agents/frontend.md) |
 | Full engineering standards & output contract | [docs/agents/engineering-standards.md](docs/agents/engineering-standards.md) |
 | Reusable agent skills (commit style, authoring) | [.github/skills/README.md](.github/skills/README.md) |

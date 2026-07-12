@@ -42,7 +42,7 @@ cargo test --test '*'
 |---|---|
 | `pr-quality-gate.yml` | `cargo fmt`, `clippy`, and UI linting |
 | `integration-tests.yml` | Boots ephemeral PostgreSQL 16+, builds the binary, runs E2E Bash tests for routing, invalidation, and headers |
-| `performance-harness.yml` | Runs an extreme-load harness (peak traffic + adversarial forged-id flood + concurrent writers), enforces latency/throughput/error-rate SLO assertions, and uploads a JSON report artifact |
+| `performance-harness.yml` | Runs an extreme-load release harness that enforces latency/throughput/error-rate SLOs, plus an independent symbolized profiling job that uploads Peak and Adversarial flamegraphs |
 | `build-binaries.yml` | Cross-compiles for Linux/macOS/Windows |
 | `docker-publish.yml` | Builds minimal `distroless`/`scratch` OCI images |
 
@@ -71,6 +71,11 @@ cargo test --release --features integration --test performance_harness -- --igno
 Tune load and assertion thresholds via `PERF_*` environment variables (see the
 workflow for the canonical set). The harness writes
 `target/performance-harness-report.json` by default.
+
+The workflow's separate profiling job uses fixed representative workloads to
+produce interactive CPU flamegraphs without changing the stripped release
+profile or its SLO measurements. See [profiling.md](profiling.md) for the
+architecture, configuration, local command, and interpretation guidance.
 
 ## Acceptance criteria
 

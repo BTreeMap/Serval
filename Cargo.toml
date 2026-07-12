@@ -18,6 +18,9 @@ path = "src/main.rs"
 # Integration tests require a live PostgreSQL (provided by CI / testcontainers).
 # They are gated off by default so `cargo test` is green on machines without a DB.
 integration = []
+# In-process CPU sampling for the dedicated performance harness. The optional
+# dependency is absent from normal builds and release artifacts.
+profiling = ["dep:pprof"]
 
 [dependencies]
 # Web framework
@@ -93,6 +96,9 @@ chrono = { version = "0.4", features = ["serde"] }
 # Command-line interface (serve + admin allowlist management)
 clap = { version = "4", features = ["derive"] }
 
+# Rootless, in-process CPU profiling for the opt-in performance harness only.
+pprof = { version = "0.15", default-features = false, features = ["flamegraph"], optional = true }
+
 [build-dependencies]
 # build.rs orchestrates the frontend build before embedding frontend/dist/.
 
@@ -111,3 +117,11 @@ harness = false
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# Keep production-equivalent optimization while retaining enough DWARF and
+# symbol information for actionable flamegraphs. Normal release builds never
+# select this profile and remain stripped.
+[profile.profiling]
+inherits = "release"
+debug = 1
+strip = "none"

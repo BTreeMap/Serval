@@ -25,6 +25,10 @@ use tokio::sync::Mutex;
 
 const TEST_ID_SECRET: &str = "performance-suite-id-signing-secret-please";
 
+#[cfg(feature = "profiling")]
+#[path = "performance_harness/profiling.rs"]
+mod profiling;
+
 #[derive(Clone)]
 struct Harness {
     control_base: String,
