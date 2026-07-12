@@ -114,7 +114,8 @@ name = "data_plane_hot_path"
 harness = false
 
 [profile.release]
-lto = "thin"
+opt-level = 3
+lto = true
 codegen-units = 1
 strip = true
 
