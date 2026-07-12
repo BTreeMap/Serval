@@ -70,11 +70,11 @@ subtle = "2"
 jsonwebtoken = { version = "10", features = ["use_pem", "aws_lc_rs"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
-# Rendering engine
-regex = "1"
-
 # Tolerant query-string parsing for delivery template variables
 form_urlencoded = "1"
+
+# SIMD-accelerated fixed-delimiter search for the rendering hot path
+memchr = "2"
 
 # MIME resolution
 mime_guess = "2"

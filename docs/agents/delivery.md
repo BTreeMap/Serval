@@ -92,9 +92,23 @@ loop, not via the in-process cache.
 
 ## Rendering engine (`src/renderer.rs`)
 
-- Compile one global `Regex` for `\{\{([a-zA-Z0-9_]+)\}\}` using
-  `std::sync::LazyLock` — compile once, reuse forever.
-- Run in strict **O(N)** over the input.
+- Find the fixed `{{` opener with `memchr::memmem`'s architecture-optimized
+  substring search, then validate `[a-zA-Z0-9_]+}}` with a deterministic byte
+  scanner. Its input cursor is monotonic, it never backtracks, and malformed or
+  overlapping openers advance by one byte. Lexical recognition is worst-case
+  **O(N)** with **O(1)** auxiliary scanner state.
+- Parse a raw query only after the first syntactically valid placeholder, and
+  allocate an output string only after the first placeholder whose key has a
+  replacement. Static and malformed-only templates avoid query parsing;
+  unknown-only templates may build the query map but still return the template
+  borrowed without allocating an output string.
+- Complete query rendering is expected **O(N + Q + O)** for template length
+  `N`, query length `Q`, and emitted output length `O`, under standard expected
+  `HashMap` behavior. Hashing and equality cost **O(key length)** rather than
+  constant time, but the total bytes in disjoint placeholder keys are bounded
+  by `N`, and query-key bytes by `Q`. Adversarial hash collisions are outside
+  this expected bound and can make lookup probe work exceed it; only lexical
+  recognition has the unconditional worst-case **O(N)** guarantee.
 - Replace only keys present in the supplied variables map.
 - **Tolerant by design:** leave any unmatched `{{key}}` completely untouched as
   literal text. A request `GET /?port=8080` against a snippet containing

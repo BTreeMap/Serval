@@ -41,6 +41,9 @@ static FORGED_ID: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 static STATIC_CONTENT: &str =
     "Serval serves this placeholder-free snippet directly from the data plane cache.\n";
 static TEMPLATE_CONTENT: &str = "listen={{port}} tenant={{tenant}} missing={{uuid}}\n";
+static UNKNOWN_TEMPLATE: &str = "listen={{host}} tenant={{account}} missing={{uuid}}\n";
+static MALFORMED_TEMPLATE: &str =
+    "listen={{bad-key}} tenant={{ space }} empty={{}} unclosed={{uuid\n";
 static LONG_STATIC_CONTENT: LazyLock<String> = LazyLock::new(|| {
     let mut content = String::with_capacity(32 * 1024);
     for line in 0..512 {
@@ -302,6 +305,22 @@ fn render_template_with_substitutions() {
 }
 
 #[divan::bench]
+fn render_unknown_template_without_substitutions() {
+    black_box(renderer::render(
+        black_box(UNKNOWN_TEMPLATE),
+        black_box(&VARIABLES),
+    ));
+}
+
+#[divan::bench]
+fn render_malformed_template_without_substitutions() {
+    black_box(renderer::render(
+        black_box(MALFORMED_TEMPLATE),
+        black_box(&VARIABLES),
+    ));
+}
+
+#[divan::bench]
 fn render_many_placeholders_with_substitutions() {
     black_box(renderer::render(
         black_box(&MANY_PLACEHOLDERS),
@@ -329,6 +348,22 @@ fn render_query_static_long_content_long_query() {
 fn render_query_template_short_query() {
     black_box(renderer::render_query(
         black_box(TEMPLATE_CONTENT),
+        black_box(SHORT_QUERY),
+    ));
+}
+
+#[divan::bench]
+fn render_query_unknown_template_short_query() {
+    black_box(renderer::render_query(
+        black_box(UNKNOWN_TEMPLATE),
+        black_box(SHORT_QUERY),
+    ));
+}
+
+#[divan::bench]
+fn render_query_malformed_template_short_query() {
+    black_box(renderer::render_query(
+        black_box(MALFORMED_TEMPLATE),
         black_box(SHORT_QUERY),
     ));
 }
