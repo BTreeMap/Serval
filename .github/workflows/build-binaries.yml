@@ -16,6 +16,11 @@ jobs:
   build:
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    # `--target` nests selected-target output under this release-only root. The
+    # cache key below still distinguishes every target triple explicitly.
+    env:
+      CARGO_TARGET_DIR: target/ci-release
+      CARGO_BUILD_TARGET: ${{ matrix.target }}
     # Read-only: this job runs untrusted third-party code (npm install scripts,
     # cargo build scripts/proc-macros). Keeping it without write scopes means a
     # poisoned dependency has no release/packages token to steal. The compiled
@@ -69,6 +74,20 @@ jobs:
       - name: Install Rust target
         run: rustup target add ${{ matrix.target }}
 
+      # rust-cache recognizes Cargo's nested target-triple directories beneath
+      # this release-only root. The target-triple key prevents cross-target
+      # reuse; only a release tag push may save, so a PR and a manually
+      # dispatched arbitrary ref can only restore caches.
+      - name: Cache Rust release dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-serval-rust
+          shared-key: ci-release-${{ matrix.target }}
+          workspaces: . -> target/ci-release
+          cache-bin: false
+          cache-workspace-crates: false
+          save-if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+
       - name: Build release binary
         run: cargo build --release --locked --target ${{ matrix.target }}
         env:
@@ -78,7 +97,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "dist/${{ matrix.asset_name }}"
+          cp "${CARGO_TARGET_DIR}/${{ matrix.target }}/release/${{ matrix.bin }}" "dist/${{ matrix.asset_name }}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

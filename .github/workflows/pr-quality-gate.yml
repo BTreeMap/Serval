@@ -21,6 +21,10 @@ jobs:
   backend:
     name: Backend (fmt, clippy, tests)
     runs-on: ubuntu-latest
+    # The debug target root is shared only with other debug CI builds. It is
+    # deliberately disjoint from release and profiling artifacts.
+    env:
+      CARGO_TARGET_DIR: target/ci-debug
     permissions:
       contents: read
     steps:
@@ -31,15 +35,18 @@ jobs:
       - name: Install Rust toolchain
         run: rustup show
 
-      # Compiler cache with a sharp trust boundary: only builds on the default
-      # branch may *write* the cache (`save-if`), while pull requests restore it
-      # read-only. A PR therefore reuses main's warm cache for speed but can
-      # never persist a poisoned artifact that a later trusted build would read.
-      - name: Cache Rust build
+      # Cache only dependency artifacts and use a typed target root. PRs may
+      # restore the default branch's cache but only a push of trusted main code
+      # may save it, so no PR can poison a cache consumed by trusted CI.
+      - name: Cache Rust debug dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          key: quality-gate
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          prefix-key: v1-serval-rust
+          shared-key: ci-debug
+          workspaces: . -> target/ci-debug
+          cache-bin: false
+          cache-workspace-crates: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Format
         run: cargo fmt --all -- --check

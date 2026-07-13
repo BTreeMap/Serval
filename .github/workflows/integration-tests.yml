@@ -21,6 +21,11 @@ jobs:
   acceptance:
     name: Acceptance suite (ephemeral PostgreSQL 16)
     runs-on: ubuntu-latest
+    # This is the same Cargo debug profile as the quality gate, never a release
+    # or profiling artifact. Sharing is safe because only trusted main pushes
+    # can write the common cache key below.
+    env:
+      CARGO_TARGET_DIR: target/ci-debug
     permissions:
       contents: read
 
@@ -32,15 +37,17 @@ jobs:
       - name: Install Rust toolchain
         run: rustup show
 
-      # Same sharp cache boundary as the quality gate: PRs restore main's warm
-      # cache read-only while only main may write it, so PRs cannot poison the
-      # cache that trusted builds later consume. A distinct key keeps the
-      # integration target dir from clobbering the quality-gate cache.
-      - name: Cache Rust build
+      # PRs restore main's cache read-only. The event and ref checks make main
+      # pushes the sole cache writers, even if this workflow gains new triggers.
+      - name: Cache Rust debug dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          key: integration
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          prefix-key: v1-serval-rust
+          shared-key: ci-debug
+          workspaces: . -> target/ci-debug
+          cache-bin: false
+          cache-workspace-crates: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       # The acceptance suite boots its own ephemeral PostgreSQL via
       # testcontainers, so only a working Docker daemon is required — which the

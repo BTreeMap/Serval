@@ -31,9 +31,15 @@ jobs:
   # build is pushed by digest only; the manifest list is assembled afterwards.
   build:
     name: Build (${{ matrix.platform }})
-    # Skip when the gating quality-gate run failed; tag and manual builds always
-    # proceed because they are not workflow_run events.
-    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    # A workflow_run gains package-write privileges, so it must only follow the
+    # green quality gate caused by a push to this repository's default branch —
+    # never a pull-request run. Tag and manual releases are maintainer actions.
+    if: >-
+      ${{ github.event_name != 'workflow_run' ||
+          (github.event.workflow_run.conclusion == 'success' &&
+           github.event.workflow_run.event == 'push' &&
+           github.event.workflow_run.head_repository.full_name == github.repository &&
+           github.event.workflow_run.head_branch == github.event.repository.default_branch) }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -89,8 +95,10 @@ jobs:
           context: .
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=${{ env.PLATFORM_PAIR }}
-          cache-to: type=gha,mode=max,scope=${{ env.PLATFORM_PAIR }}
+          # Cargo runs inside Docker, so BuildKit's container-layer cache is
+          # intentionally separate from the host rust-cache target roots.
+          cache-from: type=gha,scope=serval-image-${{ env.PLATFORM_PAIR }}
+          cache-to: type=gha,mode=max,scope=serval-image-${{ env.PLATFORM_PAIR }}
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
 
       - name: Export digest

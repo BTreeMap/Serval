@@ -29,6 +29,11 @@ jobs:
     name: Extreme-load performance harness
     runs-on: ubuntu-latest
     timeout-minutes: 35
+    # Preserve a typed release target that the native Linux release matrix can
+    # reuse. CARGO_BUILD_TARGET gives it an explicit nested target triple.
+    env:
+      CARGO_TARGET_DIR: target/ci-release
+      CARGO_BUILD_TARGET: x86_64-unknown-linux-gnu
     permissions:
       contents: read
 
@@ -40,15 +45,18 @@ jobs:
       - name: Install Rust toolchain
         run: rustup show
 
-      # Release-profile cache: keyed separately from the debug integration cache
-      # because debug and release artifacts are not interchangeable. Saving on
-      # main means each subsequent run (push or scheduled) only recompiles
-      # changed crates instead of starting cold every time.
-      - name: Cache Rust build
+      # Release artifacts are structurally isolated from debug and profiling.
+      # Only trusted pushes to main save; scheduled and manually dispatched runs
+      # may restore but can never publish a cache entry.
+      - name: Cache Rust release dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          key: performance
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          prefix-key: v1-serval-rust
+          shared-key: ci-release-x86_64-unknown-linux-gnu
+          workspaces: . -> target/ci-release
+          cache-bin: false
+          cache-workspace-crates: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Tune kernel for high-concurrency sockets
         run: |
@@ -241,6 +249,11 @@ jobs:
     name: Representative hot-path flamegraphs
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Keep symbol-bearing profiling output physically and by cache key separate
+    # from stripped release and debug build artifacts.
+    env:
+      CARGO_TARGET_DIR: target/ci-profiling
+      RUSTFLAGS: "-C force-frame-pointers=yes"
     permissions:
       contents: read
 
@@ -252,13 +265,18 @@ jobs:
       - name: Install Rust toolchain
         run: rustup show
 
-      # This cache is isolated from the stripped release harness because the
-      # profiling profile retains symbols and forces frame pointers.
-      - name: Cache profiling build
+      # RUSTFLAGS is job-scoped so rust-cache includes the frame-pointer setting
+      # in its environment hash as well as using this separate target root.
+      # Cache writes remain exclusive to trusted main pushes.
+      - name: Cache Rust profiling dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          key: profiling
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          prefix-key: v1-serval-rust
+          shared-key: ci-profiling
+          workspaces: . -> target/ci-profiling
+          cache-bin: false
+          cache-workspace-crates: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Capture representative flamegraphs
         run: >-
@@ -269,7 +287,6 @@ jobs:
           -- --ignored --nocapture
         env:
           SERVAL_SKIP_FRONTEND_BUILD: "1"
-          RUSTFLAGS: "-C force-frame-pointers=yes"
           PERF_REQUEST_TIMEOUT_SECS: "15"
           PERF_LATENCY_SAMPLE_STRIDE: "24"
           PERF_LATENCY_SAMPLE_CAPACITY: "250000"
