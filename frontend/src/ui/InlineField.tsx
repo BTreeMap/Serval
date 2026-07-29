@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { Button } from "./Button";
 import { Banner } from "./feedback";
 import * as Icons from "./icons";
+import { useInlineEdit } from "../lib/useInlineEdit";
 
 /** A seamless, Notion-style inline field. In display mode it reads as plain
  *  text — or a faint placeholder when empty — and reveals an edit affordance on
@@ -9,7 +10,10 @@ import * as Icons from "./icons";
  *  displayed typography exactly (via `displayClass`), so editing feels in-place
  *  rather than form-like. Saving is always explicit: Enter (⌘/Ctrl+Enter for
  *  multiline) or the Save button; Escape cancels. Saving an empty value yields
- *  an empty string to `onSave`, leaving the clearing semantics to the caller. */
+ *  an empty string to `onSave`, leaving the clearing semantics to the caller.
+ *
+ *  The edit lifecycle lives in {@link useInlineEdit}, shared with the content-type
+ *  editor; this component is the presentation of that state machine. */
 export function InlineField({
   value,
   onSave,
@@ -27,26 +31,20 @@ export function InlineField({
   multiline?: boolean;
   rows?: number;
 }) {
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(value ?? "");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const initial = useCallback(() => value ?? "", [value]);
+  // An empty value is a legitimate save here — it clears the field — so only an
+  // unchanged value is a no-op.
+  const isUnchanged = useCallback((next: string) => next === (value ?? ""), [value]);
+  const edit = useInlineEdit({ initial, isUnchanged, commit: onSave });
+  const isOpen = edit.isOpen;
+
   const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement | null>(null);
 
-  const open = () => {
-    setDraft(value ?? "");
-    setError(null);
-    setEditing(true);
-  };
-
-  const cancel = () => {
-    setEditing(false);
-    setError(null);
-  };
-
   // On entering edit mode, focus the control and place the caret at the end.
+  // Keyed on `isOpen`, which stays true across saving and failure, so a failed
+  // save does not yank the caret back to the end of the text.
   useEffect(() => {
-    if (!editing) {
+    if (!isOpen) {
       return;
     }
     const el = inputRef.current;
@@ -56,41 +54,23 @@ export function InlineField({
     el.focus();
     const end = el.value.length;
     el.setSelectionRange(end, end);
-  }, [editing]);
-
-  const save = async () => {
-    const next = draft.trim();
-    if (next === (value ?? "")) {
-      cancel();
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    try {
-      await onSave(next);
-      setEditing(false);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Something went wrong. Please try again.");
-    } finally {
-      setBusy(false);
-    }
-  };
+  }, [isOpen]);
 
   const onKeyDown = (event: React.KeyboardEvent) => {
     if (event.key === "Escape") {
       event.preventDefault();
-      cancel();
+      edit.cancel();
     } else if (event.key === "Enter" && (!multiline || event.metaKey || event.ctrlKey)) {
       event.preventDefault();
-      void save();
+      edit.save();
     }
   };
 
-  if (!editing) {
+  if (!isOpen) {
     return (
       <button
         type="button"
-        onClick={open}
+        onClick={edit.begin}
         aria-label={`Edit ${ariaLabel}`}
         className={`group/field -mx-2 flex w-full items-start gap-2 rounded-md px-2 py-1 text-left transition-colors hover:bg-canvas focus:outline-none focus-visible:ring-2 focus-visible:ring-wisteria/40 ${displayClass}`}
       >
@@ -114,8 +94,8 @@ export function InlineField({
           ref={(el) => {
             inputRef.current = el;
           }}
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
+          value={edit.draft}
+          onChange={(e) => edit.setDraft(e.target.value)}
           onKeyDown={onKeyDown}
           placeholder={placeholder}
           rows={rows}
@@ -127,8 +107,8 @@ export function InlineField({
           ref={(el) => {
             inputRef.current = el;
           }}
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
+          value={edit.draft}
+          onChange={(e) => edit.setDraft(e.target.value)}
           onKeyDown={onKeyDown}
           placeholder={placeholder}
           aria-label={ariaLabel}
@@ -136,17 +116,17 @@ export function InlineField({
         />
       )}
       <div className="flex flex-wrap items-center gap-2 px-2">
-        <Button size="sm" loading={busy} onClick={() => void save()}>
-          {busy ? "Saving…" : "Save"}
+        <Button size="sm" loading={edit.isSaving} onClick={edit.save}>
+          {edit.isSaving ? "Saving…" : "Save"}
         </Button>
-        <Button variant="ghost" size="sm" onClick={cancel} disabled={busy}>
+        <Button variant="ghost" size="sm" onClick={edit.cancel} disabled={edit.isSaving}>
           Cancel
         </Button>
         <span className="text-xs text-ink-faint">
           {multiline ? "⌘/Ctrl+Enter to save · Esc to cancel" : "Enter to save · Esc to cancel"}
         </span>
       </div>
-      {error && <Banner tone="error">{error}</Banner>}
+      {edit.message && <Banner tone="error">{edit.message}</Banner>}
     </div>
   );
 }

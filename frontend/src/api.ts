@@ -2,6 +2,8 @@
 // call funnels through `request` so that auth, error shaping, and JSON handling
 // live in exactly one place — components never touch `fetch` directly.
 
+import { ApiError } from "./lib/api-error";
+
 /** A snippet route as returned by create/update. */
 export interface SnippetResponse {
     id: string;
@@ -145,16 +147,9 @@ export interface UpdateRequest {
     description?: string;
 }
 
-/** A typed error carrying the HTTP status for caller-side branching. */
-export class ApiError extends Error {
-    readonly status: number;
-
-    constructor(status: number, message: string) {
-        super(message);
-        this.name = "ApiError";
-        this.status = status;
-    }
-}
+// Re-exported so `ApiError` stays part of this module's public surface while the
+// class itself is importable by code that must not depend on build-time config.
+export { ApiError };
 
 /** The bearer token used for authenticated requests, when present. */
 let authToken: string | null = null;
@@ -236,8 +231,8 @@ function pageQuery(params: PageParams): string {
 }
 
 export const api = {
-    authInfo(): Promise<AuthInfo> {
-        return request<AuthInfo>("/api/auth-info");
+    authInfo(signal?: AbortSignal): Promise<AuthInfo> {
+        return request<AuthInfo>("/api/auth-info", { signal });
     },
 
     async getOidcDiscovery(issuerUrl: string): Promise<OidcDiscoveryResponse> {
@@ -275,12 +270,12 @@ export const api = {
         return (await response.json()) as OidcTokenResponse;
     },
 
-    me(): Promise<Me> {
-        return request<Me>("/api/me");
+    me(signal?: AbortSignal): Promise<Me> {
+        return request<Me>("/api/me", { signal });
     },
 
-    listSnippets(params: PageParams = {}): Promise<SnippetListResponse> {
-        return request<SnippetListResponse>(`/api/snippets${pageQuery(params)}`);
+    listSnippets(params: PageParams = {}, signal?: AbortSignal): Promise<SnippetListResponse> {
+        return request<SnippetListResponse>(`/api/snippets${pageQuery(params)}`, { signal });
     },
 
     createSnippet(payload: CreateRequest): Promise<SnippetResponse> {
@@ -294,15 +289,25 @@ export const api = {
         });
     },
 
-    getSnippet(id: string, params: PageParams = {}): Promise<SnippetDetail> {
+    getSnippet(
+        id: string,
+        params: PageParams = {},
+        signal?: AbortSignal,
+    ): Promise<SnippetDetail> {
         return request<SnippetDetail>(
             `/api/snippets/${encodeURIComponent(id)}${pageQuery(params)}`,
+            { signal },
         );
     },
 
-    listSnippetHistory(id: string, params: PageParams = {}): Promise<HistoryPageResponse> {
+    listSnippetHistory(
+        id: string,
+        params: PageParams = {},
+        signal?: AbortSignal,
+    ): Promise<HistoryPageResponse> {
         return request<HistoryPageResponse>(
             `/api/snippets/${encodeURIComponent(id)}/history${pageQuery(params)}`,
+            { signal },
         );
     },
 
@@ -317,9 +322,10 @@ export const api = {
         });
     },
 
-    getVersion(id: string, hash: string): Promise<VersionContent> {
+    getVersion(id: string, hash: string, signal?: AbortSignal): Promise<VersionContent> {
         return request<VersionContent>(
             `/api/snippets/${encodeURIComponent(id)}/versions/${encodeURIComponent(hash)}`,
+            { signal },
         );
     },
 
@@ -334,6 +340,14 @@ export const api = {
     },
 };
 
+/** The build-time `VITE_DATA_PLANE_URL` fallback, normalised once.
+ *
+ *  Vite substitutes this at build time, so it is a compile-time constant —
+ *  re-trimming and re-matching a regex against it inside `deliveryUrl` repeated
+ *  that work for every row, on every render. */
+const BUILD_TIME_DATA_PLANE_URL: string | null =
+    import.meta.env.VITE_DATA_PLANE_URL?.trim().replace(/\/+$/, "") || null;
+
 /** Build the public Data Plane delivery URL for a snippet id.
  *
  * The Data Plane usually lives on a different domain than the dashboard, so the
@@ -341,10 +355,9 @@ export const api = {
  * bootstrap), then the build-time `VITE_DATA_PLANE_URL`, and finally a
  * best-effort guess of `:3000` on the dashboard's own hostname for local dev. */
 export function deliveryUrl(id: string): string {
-    const buildTime = import.meta.env.VITE_DATA_PLANE_URL?.trim().replace(/\/+$/, "");
     const base =
         dataPlaneBaseUrl ??
-        (buildTime ? buildTime : null) ??
+        BUILD_TIME_DATA_PLANE_URL ??
         `${window.location.protocol}//${window.location.hostname}:3000`;
     return new URL(encodeURIComponent(id), `${base}/`).toString();
 }

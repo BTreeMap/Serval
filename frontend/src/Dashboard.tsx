@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   api,
-  ApiError,
   deliveryUrl,
   type CreateRequest,
+  type SnippetListResponse,
   type SnippetResponse,
   type SnippetSummary,
 } from "./api";
@@ -20,66 +20,64 @@ import {
   Skeleton,
   Textarea,
 } from "./ui";
-import { COMMON_CONTENT_TYPES } from "./content-types";
+import { COMMON_CONTENT_TYPES, DEFAULT_CONTENT_TYPE } from "./content-types";
 import { loadPrefetched, prefetchKey, useHoverPrefetch } from "./prefetch";
+import { messageOfRemote, valueOf } from "./lib/remote-data";
+import { useRemoteQuery } from "./lib/useRemoteQuery";
+import { useCursorPager } from "./lib/useCursorPager";
+import type { Page } from "./lib/pagination";
+import { messageOf } from "./lib/errors";
+import { formatDate } from "./lib/format";
+
+/** Adapt a listing response to the shared pagination shape. */
+const toPage = (response: SnippetListResponse): Page<SnippetSummary> => ({
+  items: response.snippets,
+  nextCursor: response.next_cursor,
+});
 
 /** The landing page: a creation form above the caller's existing snippets. */
 export function Dashboard() {
-  const [snippets, setSnippets] = useState<SnippetSummary[]>([]);
-  const [nextCursor, setNextCursor] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [loadingMore, setLoadingMore] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const listKey = prefetchKey.snippetsList();
 
-  // Reset to the first page: used on mount and after creating a snippet, so
-  // a newly touched route's updated ordering is always visible immediately.
-  const refresh = useCallback(async () => {
-    try {
-      const page = await loadPrefetched(prefetchKey.snippetsList(), () =>
-        api.listSnippets(),
-      );
-      setSnippets(page.snippets);
-      setNextCursor(page.next_cursor);
-      setError(null);
-    } catch (err) {
-      setError(messageOf(err));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  // A first read may be answered by a link the user hovered; a revalidation —
+  // the refetch after a create — must go to the network, or it could serve a
+  // snapshot warmed before the snippet existed.
+  const list = useRemoteQuery(listKey, (signal, isRevalidation) =>
+    isRevalidation
+      ? api.listSnippets({}, signal)
+      : loadPrefetched(listKey, () => api.listSnippets({}, signal)),
+  );
 
-  const loadMore = useCallback(async () => {
-    if (!nextCursor) {
-      return;
-    }
-    setLoadingMore(true);
-    try {
-      const page = await api.listSnippets({ cursor: nextCursor });
-      setSnippets((prev) => [...prev, ...page.snippets]);
-      setNextCursor(page.next_cursor);
-      setError(null);
-    } catch (err) {
-      setError(messageOf(err));
-    } finally {
-      setLoadingMore(false);
-    }
-  }, [nextCursor]);
+  // Keyed on the *response* rather than on the query state: a failed
+  // revalidation produces a new state object carrying the same response
+  // reference, so the seed's identity — and with it every page the user has
+  // already loaded — survives the error, exactly as the old `snippets` cell did.
+  const response = valueOf(list.state);
+  const seed = useMemo(() => (response === null ? null : toPage(response)), [response]);
 
-  useEffect(() => {
-    // `refresh` only updates state after an awaited request, so the renders
-    // are not the synchronous cascade this rule guards against.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void refresh();
-  }, [refresh]);
+  const pager = useCursorPager(
+    seed,
+    useCallback(
+      (cursor: string, signal: AbortSignal) =>
+        api.listSnippets({ cursor }, signal).then(toPage),
+      [],
+    ),
+  );
+
+  const isLoading = list.state.tag === "loading";
+  // A failure to load the list at all dominates a failure to load one more page.
+  const error =
+    messageOfRemote(list.state) ??
+    (pager.more.tag === "failed" ? pager.more.message : null);
 
   return (
     <div className="space-y-8">
-      <CreateForm onCreated={() => void refresh()} />
+      <CreateForm onCreated={list.refresh} />
 
       <section className="space-y-4">
         <h2 className="text-lg font-semibold">Your snippets</h2>
         {error && <Banner tone="error">{error}</Banner>}
-        {loading ? (
+        {isLoading ? (
           <ul className="space-y-3">
             {[0, 1, 2].map((i) => (
               <li key={i}>
@@ -93,7 +91,7 @@ export function Dashboard() {
               </li>
             ))}
           </ul>
-        ) : snippets.length === 0 ? (
+        ) : pager.items.length === 0 ? (
           <EmptyState
             icon={Icons.FileText}
             title="No snippets yet"
@@ -102,19 +100,19 @@ export function Dashboard() {
         ) : (
           <>
             <ul className="space-y-3">
-              {snippets.map((s) => (
+              {pager.items.map((s) => (
                 <SnippetRow key={s.id} snippet={s} />
               ))}
             </ul>
-            {nextCursor && (
+            {pager.nextCursor && (
               <div className="flex justify-center">
                 <Button
                   variant="secondary"
                   size="sm"
-                  loading={loadingMore}
-                  onClick={() => void loadMore()}
+                  loading={pager.more.tag === "loading"}
+                  onClick={pager.loadMore}
                 >
-                  {loadingMore ? "Loading…" : "Load more"}
+                  {pager.more.tag === "loading" ? "Loading…" : "Load more"}
                 </Button>
               </div>
             )}
@@ -136,6 +134,7 @@ function SnippetRow({ snippet }: { snippet: SnippetSummary }) {
   const prefetch = useHoverPrefetch(prefetchKey.snippetDetail(snippet.id), () =>
     api.getSnippet(snippet.id),
   );
+  const url = deliveryUrl(snippet.id);
   return (
     <li>
       <Card className="flex flex-col gap-3 p-4 transition-colors hover:border-wisteria/40 sm:flex-row sm:items-center sm:justify-between sm:gap-4 md:p-5 lg:gap-6 lg:p-6">
@@ -175,7 +174,7 @@ function SnippetRow({ snippet }: { snippet: SnippetSummary }) {
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          <CopyButton value={deliveryUrl(snippet.id)} label="Copy link" size="sm" />
+          <CopyButton value={url} label="Copy link" size="sm" />
           <Link {...prefetch} to={`/s/${snippet.id}`}>
             <Button variant="secondary" size="sm">
               Details
@@ -187,52 +186,82 @@ function SnippetRow({ snippet }: { snippet: SnippetSummary }) {
   );
 }
 
+/** The editable fields of the creation form, as one value.
+ *
+ *  Grouped rather than kept as four sibling cells so that clearing the form
+ *  after a successful create is a single assignment to {@link EMPTY_DRAFT}. The
+ *  old four-setter reset is the shape where one forgotten field silently
+ *  survives into the next snippet. */
+interface Draft {
+  readonly content: string;
+  readonly contentType: string;
+  readonly title: string;
+  readonly description: string;
+}
+
+const EMPTY_DRAFT: Draft = Object.freeze({
+  content: "",
+  contentType: DEFAULT_CONTENT_TYPE,
+  title: "",
+  description: "",
+});
+
+/** The state of the in-flight submission. `created` is deliberately *not* part
+ *  of this union: "the last snippet I successfully made" is a fact that
+ *  outlives the current attempt, and its link stays useful while a later
+ *  attempt is failing. */
+type Submission =
+  | { readonly tag: "idle" }
+  | { readonly tag: "submitting" }
+  | { readonly tag: "failed"; readonly message: string };
+
+const IDLE: Submission = Object.freeze({ tag: "idle" as const });
+
+/** Build the create payload, including only the fields the user actually
+ *  filled in. Immutable construction — an absent field is absent from the
+ *  object rather than present and empty. */
+function createPayload(draft: Draft): CreateRequest {
+  const contentType = draft.contentType.trim();
+  const title = draft.title.trim();
+  const description = draft.description.trim();
+  return {
+    content: draft.content,
+    ...(contentType ? { content_type: contentType } : {}),
+    ...(title ? { title } : {}),
+    ...(description ? { description } : {}),
+  };
+}
+
 /** The snippet creation form. */
 function CreateForm({ onCreated }: { onCreated: () => void }) {
-  const [content, setContent] = useState("");
-  const [contentType, setContentType] = useState("text/plain; charset=utf-8");
-  const [title, setTitle] = useState("");
-  const [description, setDescription] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT);
+  const [submission, setSubmission] = useState<Submission>(IDLE);
   const [created, setCreated] = useState<SnippetResponse | null>(null);
 
+  const busy = submission.tag === "submitting";
   // Single source of truth for submittability: the handler guard and the
   // button's disabled state derive from the same predicate, so the UI can
   // never offer an action the handler would reject.
-  const canSubmit = content.length > 0;
+  const canSubmit = draft.content.length > 0;
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (!canSubmit) {
+    if (!canSubmit || busy) {
       return;
     }
-    setBusy(true);
-    setError(null);
+    setSubmission({ tag: "submitting" });
     try {
-      const payload: CreateRequest = { content };
-      if (contentType.trim()) {
-        payload.content_type = contentType.trim();
-      }
-      if (title.trim()) {
-        payload.title = title.trim();
-      }
-      if (description.trim()) {
-        payload.description = description.trim();
-      }
-      const result = await api.createSnippet(payload);
+      const result = await api.createSnippet(createPayload(draft));
       setCreated(result);
-      setContent("");
-      setContentType("text/plain; charset=utf-8");
-      setTitle("");
-      setDescription("");
+      setDraft(EMPTY_DRAFT);
+      setSubmission(IDLE);
       onCreated();
     } catch (err) {
-      setError(messageOf(err));
-    } finally {
-      setBusy(false);
+      setSubmission({ tag: "failed", message: messageOf(err) });
     }
   };
+
+  const createdUrl = created === null ? null : deliveryUrl(created.id);
 
   return (
     <Card>
@@ -244,31 +273,31 @@ function CreateForm({ onCreated }: { onCreated: () => void }) {
       <form onSubmit={(e) => void submit(e)} className="mt-4 space-y-4">
         <div className="flex flex-col gap-3 sm:flex-row sm:gap-4">
           <Input
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
+            value={draft.title}
+            onChange={(e) => setDraft((d) => ({ ...d, title: e.target.value }))}
             placeholder="Title (optional)"
             aria-label="Snippet title"
             className="sm:flex-1"
           />
           <Input
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
+            value={draft.description}
+            onChange={(e) => setDraft((d) => ({ ...d, description: e.target.value }))}
             placeholder="Description (optional)"
             aria-label="Snippet description"
             className="sm:flex-1"
           />
         </div>
         <Textarea
-          value={content}
-          onChange={(e) => setContent(e.target.value)}
+          value={draft.content}
+          onChange={(e) => setDraft((d) => ({ ...d, content: e.target.value }))}
           placeholder="Hello {{name}} on port {{port}}"
           rows={6}
           aria-label="Snippet content"
         />
         <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:gap-4">
           <Combobox
-            value={contentType}
-            onChange={setContentType}
+            value={draft.contentType}
+            onChange={(contentType) => setDraft((d) => ({ ...d, contentType }))}
             options={COMMON_CONTENT_TYPES}
             placeholder="content type"
             className="sm:flex-1"
@@ -282,36 +311,22 @@ function CreateForm({ onCreated }: { onCreated: () => void }) {
             {busy ? "Creating…" : "Create"}
           </Button>
         </div>
-        {error && <Banner tone="error">{error}</Banner>}
+        {submission.tag === "failed" && <Banner tone="error">{submission.message}</Banner>}
       </form>
 
-      {created && (
+      {created && createdUrl && (
         <div className="mt-4">
           <Banner tone="success">
             <p className="font-medium">Created successfully.</p>
             <div className="mt-2 flex items-center gap-2">
               <code className="min-w-0 flex-1 truncate font-mono text-xs text-ink">
-                {deliveryUrl(created.id)}
+                {createdUrl}
               </code>
-              <CopyButton value={deliveryUrl(created.id)} label="Copy link" size="sm" />
+              <CopyButton value={createdUrl} label="Copy link" size="sm" />
             </div>
           </Banner>
         </div>
       )}
     </Card>
   );
-}
-
-/** Extract a user-facing message from an unknown error. */
-function messageOf(err: unknown): string {
-  if (err instanceof ApiError) {
-    return err.message;
-  }
-  return "Something went wrong. Please try again.";
-}
-
-/** Render an ISO timestamp as a short local string. */
-function formatDate(iso: string): string {
-  const date = new Date(iso);
-  return Number.isNaN(date.getTime()) ? iso : date.toLocaleString();
 }

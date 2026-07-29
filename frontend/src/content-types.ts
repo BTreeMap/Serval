@@ -4,8 +4,10 @@
  *  (charset on the `text/*` types). The value at delivery time still prefers a
  *  filename-extension guess; this only sets the fallback stored on the route,
  *  and free text is always allowed for anything not listed here. */
+export const DEFAULT_CONTENT_TYPE = "text/plain; charset=utf-8";
+
 export const COMMON_CONTENT_TYPES = [
-  "text/plain; charset=utf-8",
+  DEFAULT_CONTENT_TYPE,
   "text/html; charset=utf-8",
   "text/markdown; charset=utf-8",
   "text/css; charset=utf-8",

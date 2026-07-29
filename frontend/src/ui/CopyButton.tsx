@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "./Button";
 import { Check, Copy } from "./icons";
 
@@ -6,6 +6,18 @@ import { Check, Copy } from "./icons";
  *  render time, or a lazy loader resolved on click. The union makes the two
  *  mutually exclusive — a button is provably one or the other, never both. */
 type CopySource = { value: string } | { load: () => Promise<string> };
+
+/** The button's lifecycle. Two independent booleans (`copied`, `loading`) had a
+ *  fourth combination — loading *and* showing "Copied!" — that no path could
+ *  reach; three named states say the same thing without the dead corner. */
+type CopyState = { readonly tag: "idle" } | { readonly tag: "loading" } | { readonly tag: "copied" };
+
+const IDLE: CopyState = Object.freeze({ tag: "idle" as const });
+const LOADING: CopyState = Object.freeze({ tag: "loading" as const });
+const COPIED: CopyState = Object.freeze({ tag: "copied" as const });
+
+/** How long the "Copied!" confirmation stays up. */
+const CONFIRM_MS = 1500;
 
 /** A button that copies text to the clipboard and confirms briefly with an
  *  icon swap. Eager sources copy instantly; lazy sources fetch on click,
@@ -17,12 +29,24 @@ export function CopyButton(
     },
 ) {
     const { label = "Copy", size = "md" } = props;
-    const [copied, setCopied] = useState(false);
-    const [loading, setLoading] = useState(false);
+    const [state, setState] = useState<CopyState>(IDLE);
+
+    // The confirmation timer is a resource with a lifetime, so it gets an owner
+    // and a disposal path: re-copying replaces it rather than stacking a second
+    // timer that would clear the new confirmation early, and unmounting cancels
+    // it instead of leaving a pending write to a component that is gone.
+    const timer = useRef<number | null>(null);
+    const clearTimer = useCallback(() => {
+        if (timer.current !== null) {
+            window.clearTimeout(timer.current);
+            timer.current = null;
+        }
+    }, []);
+    useEffect(() => clearTimer, [clearTimer]);
 
     const copy = async () => {
         // A load already in flight; ignore re-clicks until it settles.
-        if (loading) {
+        if (state.tag === "loading") {
             return;
         }
         try {
@@ -30,24 +54,27 @@ export function CopyButton(
             if ("value" in props) {
                 text = props.value;
             } else {
-                setLoading(true);
+                setState(LOADING);
                 text = await props.load();
             }
             await navigator.clipboard.writeText(text);
-            setCopied(true);
-            setTimeout(() => setCopied(false), 1500);
+            setState(COPIED);
+            clearTimer();
+            timer.current = window.setTimeout(() => {
+                timer.current = null;
+                setState(IDLE);
+            }, CONFIRM_MS);
         } catch {
-            setCopied(false);
-        } finally {
-            setLoading(false);
+            setState(IDLE);
         }
     };
 
+    const copied = state.tag === "copied";
     return (
         <Button
             variant="secondary"
             size={size}
-            loading={loading}
+            loading={state.tag === "loading"}
             onClick={() => void copy()}
             type="button"
         >

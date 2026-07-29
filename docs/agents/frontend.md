@@ -17,7 +17,45 @@ cd frontend
 npm ci          # reproducible install
 npm run build   # produces frontend/dist/ for build.rs to embed
 npm run lint    # must pass for the quality gate
+npm test        # node:test over the pure core in src/lib/ (no extra deps)
 ```
+
+## The pure core (`src/lib/`)
+
+Framework-free, directly testable modules that carry the app's domain vocabulary.
+Components are the presentation of these; the rules live here, once.
+
+- `remote-data.ts` — `RemoteData<T>`: the `loading | success | failure` union that
+  replaced every `data` + `loading` + `error` cell trio. `failure` carries the
+  last good value (`stale`), which is what lets a list stay on screen under an
+  error banner after a failed revalidation. Eliminate it with `foldRemote`.
+- `pagination.ts` — `Page<T>` plus the pure cursor-pagination fold
+  (`concatPages`, `cursorAfter`, `loadedCount`). Ordered, non-commutative.
+- `useRemoteQuery.ts` — the effect interpreter for a keyed read. `loading` is
+  **derived** from whether the newest request has settled, never stored, and the
+  effect aborts on cleanup so a stale response cannot land. Its `refresh()`
+  revalidates without clearing the screen and resolves once the new value is
+  committed, so a mutation can await a consistent view.
+- `useCursorPager.ts` — appends further pages to a seed the query owns. Pages are
+  tagged with the seed they extend, so an append that resolves after a refresh
+  cannot land on the new collection.
+- `useInlineEdit.ts` — the `viewing | editing | saving | failed` state machine
+  shared by every inline editor.
+- `errors.ts` — `messageOf`: only an `ApiError` message reaches the user.
+- `format.ts` — one hoisted `Intl.DateTimeFormat`, not one per row per render.
+
+Rules for this directory:
+
+- **Nothing in `src/lib/` may import from outside `src/lib/`,** and imports
+  within it carry the `.ts` extension, so the core runs unbundled under
+  `node --test`. That is the whole reason `ApiError` lives in `lib/api-error.ts`
+  and is re-exported from `api.ts`.
+- **Derive, don't store.** If a value is a function of other state (`loading`,
+  a filtered list, an error parsed from the URL), compute it during render.
+  Two cells that must agree are two cells that can disagree.
+- **A `react-hooks` complaint is design feedback, not noise.** All three former
+  `eslint-disable react-hooks/set-state-in-effect` comments were removed by
+  changing the state shape, not by suppressing the rule. Do not reintroduce one.
 
 ## Conventions
 
@@ -92,4 +130,10 @@ just a pointer to a specific revision in the edit history.
 - After a mutation that changes ordering or appends history (create, update,
   restore), refetch from the first page rather than trying to patch an
   in-memory page — `Dashboard.tsx` and `SnippetDetail.tsx` both do this via
-  their `refresh()` callbacks.
+  the `refresh()` their `useRemoteQuery` returns. That refetch replaces the
+  seed page, which is also what discards any previously appended pages; there
+  is no separate reset to keep in sync.
+- **A revalidation must not be answered from the prefetch cache.** A refetch
+  after a write exists to observe that write, and a link warmed seconds earlier
+  predates it. `useRemoteQuery` passes `isRevalidation` to its loader for
+  exactly this; consult it rather than calling `loadPrefetched` unconditionally.

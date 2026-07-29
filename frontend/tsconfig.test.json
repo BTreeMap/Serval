@@ -1,11 +1,8 @@
 {
     "compilerOptions": {
-        "target": "ES2022",
-        "useDefineForClassFields": true,
+        "target": "ES2023",
         "lib": [
-            "ES2022",
-            "DOM",
-            "DOM.Iterable"
+            "ES2023"
         ],
         "module": "ESNext",
         "skipLibCheck": true,
@@ -14,18 +11,17 @@
         "verbatimModuleSyntax": true,
         "moduleDetection": "force",
         "noEmit": true,
-        "jsx": "react-jsx",
         "strict": true,
         "noUnusedLocals": true,
         "noUnusedParameters": true,
         "erasableSyntaxOnly": true,
         "noFallthroughCasesInSwitch": true,
-        "noUncheckedSideEffectImports": true
+        "noUncheckedSideEffectImports": true,
+        "types": [
+            "node"
+        ]
     },
     "include": [
-        "src"
-    ],
-    "exclude": [
         "src/**/*.test.ts"
     ]
 }

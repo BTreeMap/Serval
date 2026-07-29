@@ -62,6 +62,22 @@ function isFresh(entry: Entry | undefined, ttlMs: number): entry is Entry {
     return entry !== undefined && Date.now() - entry.createdAt < ttlMs;
 }
 
+/** Drop entries past their TTL.
+ *
+ *  A warmed entry is deleted when consumed, but a link that is hovered and never
+ *  clicked leaves one behind — and `snippet:<id>` keys are unbounded, so a long
+ *  session spent scrolling the list would retain a response per row for as long
+ *  as the tab lives. Sweeping on insert bounds the cache to the entries created
+ *  within one TTL window, which is a handful. */
+function sweepExpired(ttlMs: number): void {
+    const now = Date.now();
+    for (const [key, entry] of cache) {
+        if (now - entry.createdAt >= ttlMs) {
+            cache.delete(key);
+        }
+    }
+}
+
 /** Warm the cache for `key` by invoking `loader`. Idempotent and best-effort:
  *  at most one in-flight request per key within the TTL window, and a failed
  *  warm simply drops the entry so the real navigation fetches normally. */
@@ -73,6 +89,7 @@ export function prefetch(
     if (isFresh(cache.get(key), ttlMs)) {
         return;
     }
+    sweepExpired(ttlMs);
     const promise = loader();
     // Swallow rejections here so an unclicked prefetch never surfaces an
     // unhandled rejection; drop the entry so navigation retries against the

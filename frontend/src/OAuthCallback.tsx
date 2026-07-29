@@ -3,43 +3,65 @@ import { Navigate, useNavigate, useSearchParams } from "react-router-dom";
 import { useAuth } from "./auth-context";
 import { Banner, Card, Loading } from "./ui";
 
+/** The OAuth redirect target: exchanges the authorization code for a token and
+ *  returns to the dashboard.
+ *
+ *  Both branches below wait for the bootstrap probe to settle. Redirecting on
+ *  `mode !== "oauth"` while `mode` is still `null` fired on the very first
+ *  render — before any probe could have answered — so this screen bounced to
+ *  `/` every time and neither its progress nor its failure state was reachable.
+ *  Starting the exchange early had the same root cause: `completeOAuthLogin`
+ *  needs the OAuth config the probe fetches, so it failed with a misleading
+ *  "OAuth is not configured" before the config had had a chance to arrive. */
 export function OAuthCallback() {
     const [searchParams] = useSearchParams();
     const navigate = useNavigate();
-    const { mode, completeOAuthLogin } = useAuth();
-    const [error, setError] = useState<string | null>(null);
+    const { mode, loading, completeOAuthLogin } = useAuth();
+    const [exchangeError, setExchangeError] = useState<string | null>(null);
+
+    // Derived from the URL during render rather than pushed into state by an
+    // effect: these are a pure function of the query string, and storing them
+    // would be a second copy that can disagree with it.
+    const providerError = searchParams.get("error");
+    const code = searchParams.get("code");
+    const state = searchParams.get("state");
+    const paramError = providerError
+        ? (searchParams.get("error_description") || providerError)
+        : !code || !state
+          ? "Missing OAuth callback parameters."
+          : null;
 
     useEffect(() => {
-        const run = async () => {
-            const providerError = searchParams.get("error");
-            if (providerError) {
-                setError(searchParams.get("error_description") || providerError);
-                return;
-            }
-
-            const code = searchParams.get("code");
-            const state = searchParams.get("state");
-            if (!code || !state) {
-                setError("Missing OAuth callback parameters.");
-                return;
-            }
-
-            try {
-                await completeOAuthLogin(code, state);
-                navigate("/", { replace: true });
-            } catch (cause) {
-                setError(
-                    cause instanceof Error ? cause.message : "Failed to complete OAuth sign-in.",
-                );
-            }
+        if (loading || mode !== "oauth" || paramError || !code || !state) {
+            return;
+        }
+        let cancelled = false;
+        void completeOAuthLogin(code, state).then(
+            () => {
+                if (!cancelled) {
+                    navigate("/", { replace: true });
+                }
+            },
+            (cause: unknown) => {
+                if (!cancelled) {
+                    setExchangeError(
+                        cause instanceof Error
+                            ? cause.message
+                            : "Failed to complete OAuth sign-in.",
+                    );
+                }
+            },
+        );
+        return () => {
+            cancelled = true;
         };
+    }, [loading, mode, paramError, code, state, completeOAuthLogin, navigate]);
 
-        void run();
-    }, [completeOAuthLogin, navigate, searchParams]);
-
-    if (mode !== "oauth") {
+    if (!loading && mode !== "oauth") {
         return <Navigate to="/" replace />;
     }
+
+    const error = paramError ?? exchangeError;
 
     return (
         <div className="flex min-h-full items-center justify-center bg-canvas px-6">

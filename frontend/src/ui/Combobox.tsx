@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { ChevronDown } from "./icons";
 import { controlClass } from "./form";
 
@@ -18,14 +18,23 @@ export function Combobox({
     className?: string;
 }) {
     const [open, setOpen] = useState(false);
-    const [active, setActive] = useState(-1);
+    // The highlighted suggestion is identified by its *value*, not by an index
+    // into a list that re-filters as the user types. An index and its list are
+    // two things that can disagree — a `-1` sentinel plus a bound that shifts
+    // under it — whereas a value is either still among the matches or is not.
+    const [activeOption, setActiveOption] = useState<string | null>(null);
     const containerRef = useRef<HTMLDivElement>(null);
     const listId = useId();
 
     const needle = value.trim().toLowerCase();
-    const matches = options.filter((option) =>
-        needle === "" ? true : option.toLowerCase().includes(needle),
+    const matches = useMemo(
+        () => (needle === "" ? options : options.filter((o) => o.toLowerCase().includes(needle))),
+        [options, needle],
     );
+
+    // -1 when nothing is highlighted, or when the highlight fell out of the
+    // current matches. Both read the same way to the caller: "no cursor yet".
+    const activeIndex = activeOption === null ? -1 : matches.indexOf(activeOption);
 
     useEffect(() => {
         if (!open) {
@@ -43,27 +52,40 @@ export function Combobox({
     const choose = (option: string) => {
         onChange(option);
         setOpen(false);
-        setActive(-1);
+        setActiveOption(null);
+    };
+
+    /** Move the highlight by `step`, clamped to the ends of the match list. */
+    const move = (step: number) => {
+        if (matches.length === 0) {
+            setActiveOption(null);
+            return;
+        }
+        const next = Math.min(Math.max(activeIndex + step, 0), matches.length - 1);
+        setActiveOption(matches[next]);
     };
 
     const onKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
         if (event.key === "ArrowDown") {
             event.preventDefault();
             setOpen(true);
-            setActive((prev) => Math.min(prev + 1, matches.length - 1));
+            move(1);
         } else if (event.key === "ArrowUp") {
             event.preventDefault();
-            setActive((prev) => Math.max(prev - 1, 0));
+            move(-1);
         } else if (event.key === "Enter") {
-            if (open && active >= 0 && active < matches.length) {
+            if (open && activeIndex >= 0) {
                 event.preventDefault();
-                choose(matches[active]);
+                choose(matches[activeIndex]);
             }
         } else if (event.key === "Escape") {
             setOpen(false);
-            setActive(-1);
+            setActiveOption(null);
         }
     };
+
+    const optionId = (index: number) => `${listId}-option-${index}`;
+    const showList = open && matches.length > 0;
 
     return (
         <div ref={containerRef} className={`relative ${className}`}>
@@ -73,11 +95,17 @@ export function Combobox({
                 aria-expanded={open}
                 aria-controls={listId}
                 aria-autocomplete="list"
+                // Completes the ARIA contract the listbox already declares:
+                // without it, the keyboard highlight below is invisible to a
+                // screen reader.
+                aria-activedescendant={
+                    showList && activeIndex >= 0 ? optionId(activeIndex) : undefined
+                }
                 value={value}
                 onChange={(e) => {
                     onChange(e.target.value);
                     setOpen(true);
-                    setActive(-1);
+                    setActiveOption(null);
                 }}
                 onFocus={() => setOpen(true)}
                 onKeyDown={onKeyDown}
@@ -90,7 +118,7 @@ export function Combobox({
                 }`}
                 aria-hidden
             />
-            {open && matches.length > 0 && (
+            {showList && (
                 <ul
                     id={listId}
                     role="listbox"
@@ -99,15 +127,16 @@ export function Combobox({
                     {matches.map((option, index) => (
                         <li
                             key={option}
+                            id={optionId(index)}
                             role="option"
-                            aria-selected={index === active}
-                            onMouseEnter={() => setActive(index)}
+                            aria-selected={index === activeIndex}
+                            onMouseEnter={() => setActiveOption(option)}
                             onPointerDown={(e) => {
                                 e.preventDefault();
                                 choose(option);
                             }}
                             className={`cursor-pointer px-3 py-2 text-sm ${
-                                index === active
+                                index === activeIndex
                                     ? "bg-canvas text-ink"
                                     : "text-ink-soft"
                             }`}
