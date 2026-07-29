@@ -1,0 +1,30 @@
+name: Frontend
+description: >
+  Install, verify and build the embedded dashboard as one indivisible step.
+  Every workflow that produces `frontend/dist/` must use this action rather
+  than calling npm directly, so that producing the artifact and checking it
+  cannot come apart: a caller has no way to build without also linting and
+  testing. Adding the missing checks at each call site instead would leave
+  them free to drift again.
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 24
+        cache: npm
+        cache-dependency-path: frontend/package-lock.json
+
+    - name: Install dependencies
+      shell: bash
+      working-directory: frontend
+      run: npm ci
+
+    # `npm run verify` is the same fold expressed in package.json, so the
+    # Dockerfile's frontend stage — which cannot use a composite action — runs
+    # exactly these checks too. Keep the two in step.
+    - name: Lint, test and build
+      shell: bash
+      working-directory: frontend
+      run: npm run verify

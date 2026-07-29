@@ -14,11 +14,46 @@ serves no UI.
 
 ```bash
 cd frontend
-npm ci          # reproducible install
-npm run build   # produces frontend/dist/ for build.rs to embed
-npm run lint    # must pass for the quality gate
-npm test        # node:test over the pure core in src/lib/ (no extra deps)
+npm ci           # reproducible install
+npm run verify   # lint + test + build, in that order — the only entry point
 ```
+
+`verify` is `lint && test && build` folded into one script, and **producing
+`frontend/dist/` without checking it must stay impossible.** Every CI path goes
+through one of exactly two front doors, both of which run this fold:
+
+| Path | Front door |
+|---|---|
+| `pr-quality-gate.yml`, `build-binaries.yml` | [.github/actions/frontend](../../.github/actions/frontend/action.yml) |
+| `Dockerfile` stage 1 (used by docker-publish, integration tests) | `npm run verify` |
+
+A Dockerfile cannot call a composite action, which is why the fold also lives in
+`package.json` — keep the two in step. Do not add a bare `npm run build` step to
+a workflow: adding the missing checks at each call site is what lets them drift
+apart again. `build.rs` still runs a plain `npm run build`, because its job is to
+produce the bundle for embedding during local development; every CI path that
+*ships* a bundle verifies it first.
+
+Individual scripts (`npm run lint`, `npm test`, `npm run build`) remain for
+tight local loops.
+
+## Tests
+
+`npm test` is Node 24's built-in runner (`node --test`, no arguments so there is
+no shell globbing to break on Windows runners) over two kinds of file:
+
+- `src/lib/*.test.ts` — the pure core. Framework-free, so it needs no DOM, no
+  renderer and no test framework beyond the standard library.
+- `src/public-assets.test.ts` — anything under `public/`, which is copied
+  byte-for-byte into `dist/`. Those files are **unverified by definition**: no
+  build step parses them, so typecheck, lint and build can all be green while
+  the shipped asset renders a browser parser-error page. A `--` inside an XML
+  comment in `favicon.svg` is the concrete way this happens.
+
+When adding an assertion, reintroduce the defect it describes and confirm the
+test goes red. A test never seen fail is a hypothesis, not a guard — and assert
+that any glob or file list is non-empty, or every case below it passes
+vacuously.
 
 ## The pure core (`src/lib/`)
 

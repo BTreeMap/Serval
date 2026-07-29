@@ -8,9 +8,12 @@ WORKDIR /app/frontend
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
 
-# Build the production bundle into frontend/dist.
+# Lint, test and build the production bundle into frontend/dist. `verify` is the
+# same fold the .github/actions/frontend composite action runs, so this image
+# cannot ship a bundle that skipped the checks just because a Dockerfile cannot
+# use a composite action.
 COPY frontend/ ./
-RUN npm run build
+RUN npm run verify
 
 # ---- Stage 2: build the Rust binary ----------------------------------------
 FROM rust:1.96-slim-bookworm AS backend
