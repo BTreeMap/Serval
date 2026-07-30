@@ -39,8 +39,20 @@ tight local loops.
 
 ## Tests
 
-`npm test` is Node 24's built-in runner (`node --test`, no arguments so there is
-no shell globbing to break on Windows runners) over two kinds of file:
+`npm test` runs [scripts/run-suite.mjs](../../frontend/scripts/run-suite.mjs),
+a thin wrapper over Node 24's built-in runner. It exists for one reason:
+**`node --test` exits 0 when it discovers no test files.** Since `verify` chains
+`lint && test && build`, a suite that silently stopped being found — a rename, a
+moved directory, a change in Node's discovery patterns — would let every workflow
+and the Docker image report a green frontend while checking none of it. The
+wrapper asserts the suite is non-empty first, then invokes `node --test` with no
+arguments so there is no shell glob for a Windows or macOS runner to expand.
+
+Do not name a helper in a way that matches Node's own discovery patterns
+(`test.mjs`, `*.test.mjs`, `*-test.mjs`, `test-*.mjs`, or anything under a
+`test/` directory) — the runner will execute it as a test case.
+
+The suite covers two kinds of file:
 
 - `src/lib/*.test.ts` — the pure core. Framework-free, so it needs no DOM, no
   renderer and no test framework beyond the standard library.
